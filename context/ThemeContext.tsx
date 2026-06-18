@@ -15,15 +15,15 @@ export interface ThemeColors {
 }
 
 export const darkColors: ThemeColors = {
-  bg: '#000000',
-  card: '#0F0F0F',
-  elevated: '#161616',
+  bg: '#0A0A0C',
+  card: '#141416',
+  elevated: '#1E1E22',
   text: '#FFFFFF',
-  secondary: '#8E8E93',
-  muted: '#444444',
-  accent: '#D83B96',
-  accentMuted: 'rgba(216, 59, 150, 0.15)',
-  border: '#1C1C1E',
+  secondary: '#B0B0B5',
+  muted: '#929296',
+  accent: '#EC407A',
+  accentMuted: 'rgba(236, 64, 122, 0.15)',
+  border: '#222225',
 };
 
 export const lightColors: ThemeColors = {
@@ -31,10 +31,10 @@ export const lightColors: ThemeColors = {
   card: '#FFFFFF',
   elevated: '#FFFFFF',
   text: '#000000',
-  secondary: '#6E6E73',
-  muted: '#AEAEB2',
-  accent: '#D83B96',
-  accentMuted: 'rgba(216, 59, 150, 0.12)',
+  secondary: '#555559',
+  muted: '#7C7C80',
+  accent: '#C52F82',
+  accentMuted: 'rgba(197, 47, 130, 0.12)',
   border: '#E5E5EA',
 };
 

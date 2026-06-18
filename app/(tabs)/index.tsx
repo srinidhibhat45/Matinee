@@ -646,7 +646,7 @@ export default function DiscoverScreen() {
             const type = item.mediaType || (item.releaseDate ? 'movie' : 'tv');
             return (
               <View style={[styles.gridMediaBadge, { backgroundColor: 'rgba(10, 10, 15, 0.85)', borderColor: colors.border }]}>
-                <Text style={[styles.gridMediaText, { color: type === 'tv' ? colors.accent : '#FFFFFF' }]}>
+                <Text style={[styles.gridMediaText, { color: type === 'tv' ? '#EC407A' : '#FFFFFF' }]}>
                   {type === 'tv' ? 'Series' : 'Movie'}
                 </Text>
               </View>

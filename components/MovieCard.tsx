@@ -148,7 +148,7 @@ export default function MovieCard({
 
           {showMediaTypeBadge && (
             <View style={[styles.mediaTypeBadge, { backgroundColor: 'rgba(10, 10, 15, 0.85)', borderColor: colors.border }]}>
-              <Text style={[styles.mediaTypeText, { color: item.mediaType === 'tv' ? colors.accent : '#FFFFFF' }]}>
+              <Text style={[styles.mediaTypeText, { color: item.mediaType === 'tv' ? '#EC407A' : '#FFFFFF' }]}>
                 {item.mediaType === 'tv' ? 'Series' : 'Movie'}
               </Text>
             </View>
