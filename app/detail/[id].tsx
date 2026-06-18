@@ -141,7 +141,7 @@ function DetailedStarRow({
 }
 
 export default function DetailScreen() {
-  const { id, mediaType: mt, autoRate } = useLocalSearchParams<{ id: string; mediaType: string; autoRate?: string }>();
+  const { id, mediaType: mt, autoRate, reason } = useLocalSearchParams<{ id: string; mediaType: string; autoRate?: string; reason?: string }>();
   const router = useRouter();
   const { colors, isDark } = useTheme();
   const insets = useSafeAreaInsets();
@@ -1059,6 +1059,15 @@ export default function DetailScreen() {
             <Text style={[styles.tagline, { color: colors.secondary }]}>"{details.tagline}"</Text>
           ) : null}
         </View>
+
+        {reason ? (
+          <View style={[styles.insightBanner, { backgroundColor: colors.accentMuted, borderColor: colors.accent + '22' }]}>
+            <Ionicons name="sparkles-outline" size={13} color={colors.accent} style={{ marginRight: 6 }} />
+            <Text style={[styles.insightText, { color: colors.text }]} numberOfLines={1} ellipsizeMode="tail">
+              {reason}
+            </Text>
+          </View>
+        ) : null}
 
         {/* Action Buttons */}
         <View style={styles.actionRow}>
@@ -2116,5 +2125,20 @@ const styles = StyleSheet.create({
   placeholderText: {
     fontSize: 14,
     fontWeight: '600',
+  },
+  insightBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    borderRadius: 8,
+    borderWidth: 0.5,
+  },
+  insightText: {
+    fontSize: 12,
+    fontWeight: '500',
+    flex: 1,
   },
 });

@@ -21,6 +21,7 @@ export interface MovieCardItem {
   releaseDate: string;
   mediaType?: 'movie' | 'tv';
   certification?: string | null;
+  reason?: string;
 }
 
 interface MovieCardProps {
@@ -173,6 +174,19 @@ export default function MovieCard({
             {releaseText}
           </Text>
         ) : null}
+
+        {item.reason ? (
+          <Text
+            style={[
+              styles.reason,
+              { fontSize: config.yearSize - 2.5, color: colors.accent },
+            ]}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+          >
+            ✨ {item.reason}
+          </Text>
+        ) : null}
       </Animated.View>
     </Pressable>
   );
@@ -248,5 +262,9 @@ const styles = StyleSheet.create({
   },
   year: {
     marginTop: 2,
+  },
+  reason: {
+    marginTop: 2,
+    fontWeight: '500',
   },
 });
