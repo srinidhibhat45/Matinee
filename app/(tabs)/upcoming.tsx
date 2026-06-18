@@ -10,6 +10,7 @@ import {
   RefreshControl,
   Modal,
   Pressable,
+  ScrollView,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -42,6 +43,7 @@ export default function UpcomingScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeBucket, setActiveBucket] = useState<TimeBucket>('thisMonth');
+  const [showSeries, setShowSeries] = useState(true);
 
   // Paging and Search states
   const [page, setPage] = useState(1);
@@ -67,7 +69,7 @@ export default function UpcomingScreen() {
     }
   }, []);
 
-  const fetchUpcoming = useCallback(async (pageNum = 1, shouldAppend = false) => {
+  const fetchUpcoming = useCallback(async (pageNum = 1, shouldAppend = false, forceRefresh = false) => {
     if (isFetchingRef.current) return;
     if (shouldAppend && pageNum <= loadedPageRef.current) return;
 
@@ -85,17 +87,18 @@ export default function UpcomingScreen() {
         setLoadingMore(true);
       }
 
-      const res = await tmdbService.getUpcomingByLanguages(selectedLanguages, pageNum);
+      const res = await tmdbService.getUpcomingByLanguages(selectedLanguages, pageNum, forceRefresh);
       const rawResults = res?.results || [];
 
       // Decorate with full details (runtime, watch providers, certification, upcoming TV events)
       const results = await Promise.all(
         rawResults.map(async (item) => {
           try {
-            const details = await tmdbService.getDetails(item.id, item.mediaType || 'movie');
+            const details = await tmdbService.getDetails(item.id, item.mediaType || 'movie', forceRefresh);
             if (details) {
               let updatedReleaseDate = item.releaseDate;
               let upcomingEventTitle: string | undefined = undefined;
+              let upcomingEpisodeInfo: string | undefined = undefined;
 
               if (item.mediaType === 'tv') {
                 const todayStr = new Date().toISOString().split('T')[0];
@@ -109,8 +112,11 @@ export default function UpcomingScreen() {
                   if (episode_number === 1) {
                     eventTitle = `Season ${season_number} Premiere`;
                   } else {
-                    eventTitle = `Season ${season_number}, Ep ${episode_number}`;
+                    eventTitle = `Season ${season_number} Airing`;
                   }
+                  const s = String(season_number).padStart(2, '0');
+                  const e = String(episode_number).padStart(2, '0');
+                  upcomingEpisodeInfo = `S${s}-E${e}`;
                 }
                 // 2. Otherwise, check seasons list for future season air dates
                 if (!upcomingDate && details.seasons) {
@@ -119,7 +125,9 @@ export default function UpcomingScreen() {
                     .sort((a: any, b: any) => a.season_number - b.season_number);
                   if (futureSeasons.length > 0) {
                     upcomingDate = futureSeasons[0].air_date;
-                    eventTitle = `Season ${futureSeasons[0].season_number} Premiere`;
+                    const sNum = futureSeasons[0].season_number;
+                    eventTitle = `Season ${sNum} Premiere`;
+                    upcomingEpisodeInfo = `S${String(sNum).padStart(2, '0')}`;
                   }
                 }
 
@@ -138,6 +146,7 @@ export default function UpcomingScreen() {
                 watchProviders: details.watchProviders,
                 releaseDate: updatedReleaseDate,
                 upcomingEventTitle,
+                upcomingEpisodeInfo,
               };
             }
           } catch (err) {
@@ -296,7 +305,7 @@ export default function UpcomingScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await fetchUpcoming(1, false);
+    await fetchUpcoming(1, false, true);
     setRefreshing(false);
   }, [fetchUpcoming]);
 
@@ -394,6 +403,7 @@ export default function UpcomingScreen() {
     const isSearching = !!searchQuery.trim();
 
     let list = movies.filter((m) => {
+      if (!showSeries && m.mediaType === 'tv') return false;
       if (!m.releaseDate) return false;
       const release = new Date(m.releaseDate);
 
@@ -492,9 +502,18 @@ export default function UpcomingScreen() {
             <View style={styles.cardMainContent}>
               <View style={styles.cardLeftCol}>
                 <View style={styles.titleCertificationRow}>
-                  <Text style={[styles.cardTitle, { color: colors.text }]} numberOfLines={1}>
-                    {item.title}
-                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                    <Text style={[styles.cardTitle, { color: colors.text, flexShrink: 1 }]} numberOfLines={1}>
+                      {item.title}
+                    </Text>
+                    {item.upcomingEpisodeInfo ? (
+                      <View style={[styles.epBadgeSmall, { backgroundColor: colors.border }]}>
+                        <Text style={[styles.epBadgeTextSmall, { color: colors.secondary }]}>
+                          {item.upcomingEpisodeInfo}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
                   {item.certification ? (
                     <View style={[styles.certBadgeSmall, { borderColor: colors.border }]}>
                       <Text style={[styles.certBadgeTextSmall, { color: colors.secondary }]}>
@@ -505,17 +524,7 @@ export default function UpcomingScreen() {
                 </View>
                 
                 <View style={styles.dateRuntimeRow}>
-                  {item.upcomingEventTitle ? (
-                    <>
-                      <Text style={[styles.cardDate, { color: colors.accent, fontWeight: '700' }]}>
-                        {item.upcomingEventTitle}
-                      </Text>
-                      <Text style={[styles.cardMetaDot, { color: colors.muted }]}>·</Text>
-                      <Text style={[styles.cardDate, { color: colors.secondary }]}>{releaseDate}</Text>
-                    </>
-                  ) : (
-                    <Text style={[styles.cardDate, { color: colors.accent }]}>{releaseDate}</Text>
-                  )}
+                  <Text style={[styles.cardDate, { color: colors.accent }]}>{releaseDate}</Text>
                   {runtimeStr ? (
                     <>
                       <Text style={[styles.cardMetaDot, { color: colors.muted }]}>·</Text>
@@ -532,6 +541,14 @@ export default function UpcomingScreen() {
                       {item.mediaType === 'tv' ? 'Series' : 'Movie'}
                     </Text>
                   </View>
+
+                  {item.upcomingEventTitle && (
+                    <View style={[styles.mediaBadge, { backgroundColor: colors.accentMuted }]}>
+                      <Text style={[styles.mediaBadgeText, { color: colors.accent }]}>
+                        {item.upcomingEventTitle}
+                      </Text>
+                    </View>
+                  )}
 
                   {item.originalLanguage && (
                     <View style={[styles.mediaBadge, { backgroundColor: colors.border }]}>
@@ -641,31 +658,65 @@ export default function UpcomingScreen() {
         </View>
       ) : (
         <View style={styles.bucketRow}>
-          {[
-            { key: 'thisWeek' as TimeBucket, label: 'This Week' },
-            { key: 'thisMonth' as TimeBucket, label: 'This Month' },
-            { key: 'later' as TimeBucket, label: 'Coming Soon' },
-          ].map(({ key, label }) => (
-            <TouchableOpacity
-              key={key}
-              style={[
-                styles.bucketChip,
-                { backgroundColor: colors.card, borderColor: colors.border },
-                activeBucket === key && { backgroundColor: colors.accent, borderColor: colors.accent },
-              ]}
-              onPress={() => setActiveBucket(key)}
-            >
-              <Text
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ gap: 8 }}
+            style={{ flex: 1 }}
+          >
+            {[
+              { key: 'thisWeek' as TimeBucket, label: 'This Week' },
+              { key: 'thisMonth' as TimeBucket, label: 'This Month' },
+              { key: 'later' as TimeBucket, label: 'Coming Soon' },
+            ].map(({ key, label }) => (
+              <TouchableOpacity
+                key={key}
                 style={[
-                  styles.bucketText,
-                  { color: colors.secondary },
-                  activeBucket === key && { color: colors.bg },
+                  styles.bucketChip,
+                  { backgroundColor: colors.card, borderColor: colors.border },
+                  activeBucket === key && { backgroundColor: colors.accent, borderColor: colors.accent },
                 ]}
+                onPress={() => setActiveBucket(key)}
               >
-                {label}
-              </Text>
-            </TouchableOpacity>
-          ))}
+                <Text
+                  style={[
+                    styles.bucketText,
+                    { color: colors.secondary },
+                    activeBucket === key && { color: colors.bg },
+                  ]}
+                >
+                  {label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+
+          <TouchableOpacity
+            style={[
+              styles.seriesToggleBtn,
+              { backgroundColor: colors.card, borderColor: colors.border },
+              showSeries && { backgroundColor: colors.accentMuted, borderColor: colors.accent },
+            ]}
+            onPress={() => {
+              setShowSeries(!showSeries);
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            }}
+          >
+            <Ionicons
+              name={showSeries ? "checkbox" : "square-outline"}
+              size={14}
+              color={showSeries ? colors.accent : colors.secondary}
+              style={{ marginRight: 4 }}
+            />
+            <Text
+              style={[
+                styles.seriesToggleText,
+                { color: showSeries ? colors.accent : colors.secondary },
+              ]}
+            >
+              Series
+            </Text>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -834,6 +885,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 8,
     marginBottom: 16,
+    alignItems: 'center',
   },
   searchModeIndicator: {
     flexDirection: 'row',
@@ -1070,6 +1122,30 @@ const styles = StyleSheet.create({
   },
   bottomSheetCancelText: {
     fontSize: 15,
+    fontWeight: '700',
+  },
+  seriesToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginLeft: 8,
+  },
+  seriesToggleText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  epBadgeSmall: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  epBadgeTextSmall: {
+    fontSize: 10,
     fontWeight: '700',
   },
 });

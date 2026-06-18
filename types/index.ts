@@ -58,6 +58,7 @@ export interface TMDBMediaItem {
   runtime?: number | null;
   watchProviders?: WatchProviderResult | null;
   upcomingEventTitle?: string;
+  upcomingEpisodeInfo?: string;
 }
 
 // ─── Detail Types ────────────────────────────────────────────

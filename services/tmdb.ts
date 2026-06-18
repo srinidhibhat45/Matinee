@@ -584,8 +584,14 @@ export const tmdbService = {
   async getDetails(
     id: number,
     mediaType: MediaType,
+    forceRefresh = false,
   ): Promise<TMDBMediaDetails | null> {
     const cacheKey = `details:${mediaType}:${id}`;
+    if (forceRefresh) {
+      try {
+        await AsyncStorage.removeItem(`${CACHE_PREFIX}${cacheKey}`);
+      } catch {}
+    }
     const endpoint = mediaType === 'movie' ? `/movie/${id}` : `/tv/${id}`;
     
     const appendParts = [
@@ -843,6 +849,7 @@ export const tmdbService = {
     mediaType: MediaType,
     filters: DiscoverFilters = {},
     page = 1,
+    forceRefresh = false,
   ): Promise<PaginatedResponse<TMDBMediaItem>> {
     const endpoint =
       mediaType === 'movie' ? '/discover/movie' : '/discover/tv';
@@ -868,6 +875,11 @@ export const tmdbService = {
     };
 
     const cacheKey = `discover:${mediaType}:${page}:${JSON.stringify(filters)}`;
+    if (forceRefresh) {
+      try {
+        await AsyncStorage.removeItem(`${CACHE_PREFIX}${cacheKey}`);
+      } catch {}
+    }
     const raw = await tmdbFetch<RawPage>(endpoint, params, cacheKey);
     return toPaginated(
       raw,
@@ -978,6 +990,7 @@ export const tmdbService = {
   async getUpcomingByLanguages(
     languages: string[],
     page = 1,
+    forceRefresh = false,
   ): Promise<PaginatedResponse<TMDBMediaItem>> {
     const today = new Date().toISOString().slice(0, 10);
 
@@ -999,13 +1012,13 @@ export const tmdbService = {
             releaseDateGte: today,
             releaseDateLte: futureDate,
             sortBy: 'primary_release_date.asc',
-          }, page),
+          }, page, forceRefresh),
           this.discover('tv', {
             withOriginalLanguage: lang,
             releaseDateGte: today,
             releaseDateLte: futureDate,
             sortBy: 'popularity.desc',
-          }, page),
+          }, page, forceRefresh),
         ]);
 
         return {
