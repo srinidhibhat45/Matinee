@@ -101,6 +101,7 @@ export default function DiscoverScreen() {
   const [topRated, setTopRated] = useState<TMDBMediaItem[]>([]);
   const [homeLoading, setHomeLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const lastFetchedRef = useRef(0);
 
   const fetchHomeData = useCallback(async (isSilent = false) => {
     try {
@@ -194,6 +195,7 @@ export default function DiscoverScreen() {
           recs.filter((r: RecommendedItem) => !skipIds.has(r.id))
         );
       }
+      lastFetchedRef.current = Date.now();
     } catch (err) {
       console.error('Home data fetch error:', err);
     } finally {
@@ -203,7 +205,10 @@ export default function DiscoverScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      fetchHomeData(true);
+      const { dbChangeTimestamp } = require('../../services/database');
+      if (dbChangeTimestamp > lastFetchedRef.current) {
+        fetchHomeData(true);
+      }
     }, [fetchHomeData])
   );
 

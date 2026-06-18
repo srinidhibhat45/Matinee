@@ -10,6 +10,12 @@ import type {
 import { cloudSync } from './cloudSync';
 import type { CloudData } from './cloudSync';
 
+export let dbChangeTimestamp = Date.now();
+
+export function notifyDbChanged() {
+  dbChangeTimestamp = Date.now();
+}
+
 // ─── Derived input / update types ───────────────────────────────────
 
 export type NewWatchedItem = Omit<WatchedItem, 'id' | 'createdAt' | 'updatedAt'>;
@@ -531,6 +537,7 @@ export async function addItem(item: NewWatchedItem): Promise<number> {
       cloudSync.pushItem(saved).catch(() => {});
     }
 
+    notifyDbChanged();
     return result.lastInsertRowId;
   } catch (error) {
     console.error('[Matinee DB] addItem failed:', error);
@@ -592,6 +599,7 @@ export async function updateItem(
     if (row) {
       cloudSync.pushItem(rowToWatchedItem(row)).catch(() => {});
     }
+    notifyDbChanged();
   } catch (error) {
     console.error('[Matinee DB] updateItem failed:', error);
     throw error;
@@ -613,6 +621,7 @@ export async function deleteItem(id: number): Promise<void> {
     if (row) {
       cloudSync.deleteItemCloud(row.tmdb_id).catch(() => {});
     }
+    notifyDbChanged();
   } catch (error) {
     console.error('[Matinee DB] deleteItem failed:', error);
     throw error;
@@ -727,6 +736,7 @@ export async function addRating(rating: NewRating): Promise<number> {
       }
     }
 
+    notifyDbChanged();
     return result.lastInsertRowId;
   } catch (error) {
     console.error('[Matinee DB] addRating failed:', error);
@@ -795,6 +805,7 @@ export async function updateRating(
     if (ratingRow?.tmdb_id) {
       cloudSync.pushRating(ratingRow.tmdb_id, rowToRating(ratingRow)).catch(() => {});
     }
+    notifyDbChanged();
   } catch (error) {
     console.error('[Matinee DB] updateRating failed:', error);
     throw error;
@@ -882,6 +893,7 @@ export async function setPreference(
 
     // ── Cloud sync (fire-and-forget) ──
     cloudSync.pushPreference(key, value).catch(() => {});
+    notifyDbChanged();
   } catch (error) {
     console.error('[Matinee DB] setPreference failed:', error);
     throw error;
@@ -1497,6 +1509,7 @@ export async function addEpisodeRating(rating: {
       }
     }
 
+    notifyDbChanged();
     return result.lastInsertRowId;
   } catch (error) {
     console.error('[Matinee DB] addEpisodeRating failed:', error);
@@ -1539,6 +1552,7 @@ export async function deleteEpisodeRating(id: number): Promise<void> {
         epRow.episode_number
       ).catch(() => {});
     }
+    notifyDbChanged();
   } catch (error) {
     console.error('[Matinee DB] deleteEpisodeRating failed:', error);
     throw error;
@@ -1700,6 +1714,7 @@ export async function mergeCloudData(data: CloudData): Promise<void> {
   }
 
   console.log('[Matinee DB] Cloud data merged into local database.');
+  notifyDbChanged();
 }
 
 /**
@@ -1718,6 +1733,7 @@ export async function clearAllData(): Promise<void> {
       DELETE FROM tmdb_cache;
     `);
     console.log('[Matinee DB] All local data cleared.');
+    notifyDbChanged();
   } catch (error) {
     console.error('[Matinee DB] clearAllData failed:', error);
     throw error;

@@ -49,15 +49,18 @@ export default function UpcomingScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const isFetchingRef = useRef(false);
   const loadedPageRef = useRef(1);
+  const lastFetchedRef = useRef(0);
 
   const loadLanguagePreferences = useCallback(async () => {
     try {
       const langs = await getPreference('PREF_LANGUAGES');
-      if (langs) {
-        setSelectedLanguages(langs.split(','));
-      } else {
-        setSelectedLanguages(DEFAULT_LANGUAGES);
-      }
+      const nextLangs = langs ? langs.split(',') : DEFAULT_LANGUAGES;
+      setSelectedLanguages((prev) => {
+        if (prev.length === nextLangs.length && prev.every((l, idx) => l === nextLangs[idx])) {
+          return prev;
+        }
+        return nextLangs;
+      });
     } catch (err) {
       console.error('Load language preferences error:', err);
     }
@@ -126,6 +129,9 @@ export default function UpcomingScreen() {
 
       setPage(pageNum);
       setHasMore(pageNum < (res?.totalPages || 1));
+      if (pageNum === 1) {
+        lastFetchedRef.current = Date.now();
+      }
     } catch (err) {
       console.error('Upcoming fetch error:', err);
     } finally {
@@ -231,7 +237,11 @@ export default function UpcomingScreen() {
   useFocusEffect(
     useCallback(() => {
       loadLanguagePreferences();
-    }, [loadLanguagePreferences])
+      const { dbChangeTimestamp } = require('../../services/database');
+      if (dbChangeTimestamp > lastFetchedRef.current) {
+        fetchUpcoming(1, false);
+      }
+    }, [loadLanguagePreferences, fetchUpcoming])
   );
 
   useEffect(() => {
