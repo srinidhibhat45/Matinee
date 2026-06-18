@@ -38,6 +38,7 @@ export default function UpcomingScreen() {
   const insets = useSafeAreaInsets();
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>(['en']);
   const [upcomingMovies, setUpcomingMovies] = useState<TMDBMediaItem[]>([]);
+  const [dbStatusMap, setDbStatusMap] = useState<Record<number, string>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeBucket, setActiveBucket] = useState<TimeBucket>('thisMonth');
@@ -110,6 +111,12 @@ export default function UpcomingScreen() {
       // Get all DB items to filter out (watched and not_interested)
       const dbItems = await getAllItems();
       const skipIds = new Set(dbItems.filter(i => i.status === 'watched' || i.status === 'not_interested').map(i => i.tmdbId));
+
+      const statusMap: Record<number, string> = {};
+      dbItems.forEach((item) => {
+        statusMap[item.tmdbId] = item.status;
+      });
+      setDbStatusMap(statusMap);
 
       setUpcomingMovies((prev) => {
         const filteredResults = results.filter((m) => !skipIds.has(m.id));
@@ -273,36 +280,54 @@ export default function UpcomingScreen() {
   const handleInterested = useCallback(
     async (item: TMDBMediaItem) => {
       try {
-        await addItem({
-          tmdbId: item.id,
-          mediaType: item.mediaType,
-          title: item.title,
-          posterPath: item.posterPath,
-          backdropPath: item.backdropPath,
-          overview: item.overview,
-          releaseDate: item.releaseDate,
-          genres: JSON.stringify(item.genreIds),
-          originalLanguage: item.originalLanguage,
-          runtime: 0,
-          voteAverage: item.voteAverage,
-          status: 'interested',
-          watchedDate: null,
-        });
+        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        const existingStatus = dbStatusMap[item.id];
+        if (existingStatus === 'interested' || existingStatus === 'watchlist') {
+          const existing = await getItem(item.id);
+          if (existing) {
+            await deleteItem(existing.id);
+            await notificationService.cancelReminder(item.id);
+            setDbStatusMap((prev) => {
+              const next = { ...prev };
+              delete next[item.id];
+              return next;
+            });
+          }
+        } else {
+          await addItem({
+            tmdbId: item.id,
+            mediaType: item.mediaType,
+            title: item.title,
+            posterPath: item.posterPath,
+            backdropPath: item.backdropPath,
+            overview: item.overview,
+            releaseDate: item.releaseDate,
+            genres: JSON.stringify(item.genreIds),
+            originalLanguage: item.originalLanguage,
+            runtime: 0,
+            voteAverage: item.voteAverage,
+            status: 'interested',
+            watchedDate: null,
+          });
 
-        // Schedule notification
-        await notificationService.scheduleReleaseReminder(
-          item.title,
-          item.releaseDate,
-          item.id,
-          item.mediaType
-        );
+          // Schedule notification
+          await notificationService.scheduleReleaseReminder(
+            item.title,
+            item.releaseDate,
+            item.id,
+            item.mediaType
+          );
 
-        alert(`Marked ${item.title} as interested. We'll remind you on release!`);
+          setDbStatusMap((prev) => ({
+            ...prev,
+            [item.id]: 'interested',
+          }));
+        }
       } catch (err) {
-        console.error('Mark interested error:', err);
+        console.error('Toggle interested error:', err);
       }
     },
-    []
+    [dbStatusMap]
   );
 
   const handleAddToCalendar = useCallback((item: TMDBMediaItem) => {
@@ -404,6 +429,8 @@ export default function UpcomingScreen() {
         ),
       ].slice(0, 3);
 
+      const isInterested = dbStatusMap[item.id] === 'interested' || dbStatusMap[item.id] === 'watchlist';
+
       return (
         <TouchableOpacity
           style={[styles.upcomingCard, { backgroundColor: colors.card, borderColor: colors.border }]}
@@ -415,6 +442,7 @@ export default function UpcomingScreen() {
             <Image
               source={{ uri: getImageUrl(item.posterPath, 'w185') || "" }}
               style={styles.poster}
+              resizeMode="cover"
             />
           ) : (
             <View style={[styles.poster, styles.posterPlaceholder, { backgroundColor: colors.elevated }]}>
@@ -422,93 +450,111 @@ export default function UpcomingScreen() {
             </View>
           )}
           <View style={styles.cardInfo}>
-            <View>
-              <View style={styles.titleCertificationRow}>
-                <Text style={[styles.cardTitle, { color: colors.text }]} numberOfLines={1}>
-                  {item.title}
-                </Text>
-                {item.certification ? (
-                  <View style={[styles.certBadgeSmall, { borderColor: colors.border }]}>
-                    <Text style={[styles.certBadgeTextSmall, { color: colors.secondary }]}>
-                      {item.certification}
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
-              
-              <View style={styles.dateRuntimeRow}>
-                <Text style={[styles.cardDate, { color: colors.accent }]}>{releaseDate}</Text>
-                {runtimeStr ? (
-                  <>
-                    <Text style={[styles.cardMetaDot, { color: colors.muted }]}>·</Text>
-                    <Text style={[styles.cardDate, { color: colors.secondary }]}>{runtimeStr}</Text>
-                  </>
-                ) : null}
-              </View>
-
-              {genres ? <Text style={[styles.cardGenres, { color: colors.secondary }]}>{genres}</Text> : null}
-              
-              <View style={styles.cardBadgesRow}>
-                <View style={[styles.mediaBadge, { backgroundColor: colors.accentMuted }]}>
-                  <Text style={[styles.mediaBadgeText, { color: colors.accent }]}>
-                    {item.mediaType === 'tv' ? 'Series' : 'Movie'}
+            <View style={styles.cardMainContent}>
+              <View style={styles.cardLeftCol}>
+                <View style={styles.titleCertificationRow}>
+                  <Text style={[styles.cardTitle, { color: colors.text }]} numberOfLines={1}>
+                    {item.title}
                   </Text>
+                  {item.certification ? (
+                    <View style={[styles.certBadgeSmall, { borderColor: colors.border }]}>
+                      <Text style={[styles.certBadgeTextSmall, { color: colors.secondary }]}>
+                        {item.certification}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+                
+                <View style={styles.dateRuntimeRow}>
+                  <Text style={[styles.cardDate, { color: colors.accent }]}>{releaseDate}</Text>
+                  {runtimeStr ? (
+                    <>
+                      <Text style={[styles.cardMetaDot, { color: colors.muted }]}>·</Text>
+                      <Text style={[styles.cardDate, { color: colors.secondary }]}>{runtimeStr}</Text>
+                    </>
+                  ) : null}
                 </View>
 
-                {item.originalLanguage && (
-                  <View style={[styles.mediaBadge, { backgroundColor: colors.border }]}>
-                    <Text style={[styles.mediaBadgeText, { color: colors.secondary }]}>
-                      {langName}
+                {genres ? <Text style={[styles.cardGenres, { color: colors.secondary }]}>{genres}</Text> : null}
+                
+                <View style={styles.cardBadgesRow}>
+                  <View style={[styles.mediaBadge, { backgroundColor: colors.accentMuted }]}>
+                    <Text style={[styles.mediaBadgeText, { color: colors.accent }]}>
+                      {item.mediaType === 'tv' ? 'Series' : 'Movie'}
                     </Text>
                   </View>
-                )}
+
+                  {item.originalLanguage && (
+                    <View style={[styles.mediaBadge, { backgroundColor: colors.border }]}>
+                      <Text style={[styles.mediaBadgeText, { color: colors.secondary }]}>
+                        {langName}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                {/* Watch Platform Row */}
+                <View style={styles.watchPlatformSection}>
+                  {providers.length > 0 ? (
+                    <View style={styles.watchProvidersRow}>
+                      <Text style={[styles.watchLabel, { color: colors.secondary }]}>Watch:</Text>
+                      <View style={styles.watchProvidersList}>
+                        {providers.map((p: any) => (
+                          <Image
+                            key={p.provider_id}
+                            source={{ uri: getImageUrl(p.logo_path, 'w92') || "" }}
+                            style={styles.providerLogoSmall}
+                          />
+                        ))}
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={styles.theatreBadge}>
+                      <Ionicons name="film-outline" size={12} color={colors.accent} style={{ marginRight: 4 }} />
+                      <Text style={[styles.theatreText, { color: colors.accent }]}>Theatres</Text>
+                    </View>
+                  )}
+                </View>
               </View>
-            </View>
 
-            {/* Watch Platform Row */}
-            <View style={styles.watchPlatformSection}>
-              {providers.length > 0 ? (
-                <View style={styles.watchProvidersRow}>
-                  <Text style={[styles.watchLabel, { color: colors.secondary }]}>Watch on:</Text>
-                  <View style={styles.watchProvidersList}>
-                    {providers.map((p: any) => (
-                      <Image
-                        key={p.provider_id}
-                        source={{ uri: getImageUrl(p.logo_path, 'w92') || "" }}
-                        style={styles.providerLogoSmall}
-                      />
-                    ))}
-                  </View>
-                </View>
-              ) : (
-                <View style={styles.theatreBadge}>
-                  <Ionicons name="film-outline" size={13} color={colors.accent} style={{ marginRight: 4 }} />
-                  <Text style={[styles.theatreText, { color: colors.accent }]}>Theatres</Text>
-                </View>
-              )}
-            </View>
+              {/* Action Buttons Column */}
+              <View style={styles.cardRightCol}>
+                <TouchableOpacity
+                  style={[
+                    styles.actionPillBtn,
+                    {
+                      backgroundColor: isInterested ? colors.accent : 'transparent',
+                      borderColor: isInterested ? colors.accent : colors.border,
+                    }
+                  ]}
+                  onPress={() => handleInterested(item)}
+                >
+                  <Ionicons 
+                    name={isInterested ? "notifications" : "notifications-outline"} 
+                    size={14} 
+                    color={isInterested ? colors.bg : colors.accent} 
+                  />
+                  <Text style={[styles.actionPillText, { color: isInterested ? colors.bg : colors.accent }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+                    {isInterested ? 'Active' : 'Remind'}
+                  </Text>
+                </TouchableOpacity>
 
-            <View style={styles.cardActions}>
-              <TouchableOpacity
-                style={styles.actionBtn}
-                onPress={() => handleInterested(item)}
-              >
-                <Ionicons name="notifications-outline" size={16} color={colors.accent} />
-                <Text style={[styles.actionText, { color: colors.accent }]}>Remind</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.calendarBtn}
-                onPress={() => handleAddToCalendar(item)}
-              >
-                <Ionicons name="calendar-outline" size={16} color={colors.secondary} />
-                <Text style={[styles.actionText, { color: colors.secondary }]}>Calendar</Text>
-              </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.actionPillBtn, { borderColor: colors.border }]}
+                  onPress={() => handleAddToCalendar(item)}
+                >
+                  <Ionicons name="calendar-outline" size={14} color={colors.secondary} />
+                  <Text style={[styles.actionPillText, { color: colors.secondary }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+                    Calendar
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
         </TouchableOpacity>
       );
     },
-    [handleItemPress, handleAddToCalendar, handleInterested, colors]
+    [handleItemPress, handleAddToCalendar, handleInterested, colors, dbStatusMap]
   );
 
   return (
@@ -771,7 +817,8 @@ const styles = StyleSheet.create({
   },
   poster: {
     width: 100,
-    height: 150,
+    height: '100%',
+    minHeight: 150,
   },
   posterPlaceholder: {
     justifyContent: 'center',
@@ -780,7 +827,6 @@ const styles = StyleSheet.create({
   cardInfo: {
     flex: 1,
     padding: 12,
-    justifyContent: 'space-between',
   },
   cardTitle: {
     fontSize: 16,
@@ -806,24 +852,36 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
   },
-  cardActions: {
+  cardMainContent: {
     flexDirection: 'row',
-    gap: 12,
-    marginTop: 8,
+    flex: 1,
   },
-  actionBtn: {
+  cardLeftCol: {
+    flex: 1,
+    paddingRight: 4,
+  },
+  cardRightCol: {
+    width: 84,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+    paddingLeft: 4,
+  },
+  actionPillBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    borderRadius: 20,
+    borderWidth: 1,
+    width: '100%',
+    height: 32,
   },
-  calendarBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  actionText: {
-    fontSize: 12,
-    fontWeight: '600',
+  actionPillText: {
+    fontSize: 10.5,
+    fontWeight: '700',
   },
   emptyState: {
     alignItems: 'center',
