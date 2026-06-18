@@ -2130,6 +2130,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 12,
     marginHorizontal: 20,
+    marginTop: 12,
     marginBottom: 12,
     borderRadius: 8,
     borderWidth: 0.5,
