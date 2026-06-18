@@ -11,7 +11,7 @@ Matinee is a premium, dark-themed cinema tracking and personalized recommendatio
 ## 📱 Features & Highlights
 
 ### 🎨 Premium Cinema UI/UX
-- **Sleek Dark Mode:** Tailored cinema-like visual language (Background: `#0A0A0F`, Cards: `#161621`, Accents: Amber `#FFBF00` and Teal `#2DD4BF`).
+- **Sleek Dark Mode:** Tailored cinema-like visual language (Background: `#0A0A0F`, Cards: `#161621`).
 - **Interactive Discover Feed:** Tabbed browse pages, horizontal carousels, customizable grid filters, and paginated searches with lazy loading.
 - **Media Type Identifiers:** Visual badges indicating whether a title is a **Movie** or **Series** in the recommendations feed and all-inclusive lists.
 - **Enhanced Watchlist Sorting:** Smart sorting rules partition your watchlist, prioritizing **Upcoming Releases** (sorted chronologically by release date) followed by **Released Titles** (latest releases first).
