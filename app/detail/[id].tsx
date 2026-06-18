@@ -675,10 +675,7 @@ export default function DetailScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.overlayContainer}
-    >
+    <View style={styles.overlayContainer}>
       <Pressable style={styles.modalBackdrop} onPress={handleClose} />
       <Animated.View
         style={[
@@ -690,7 +687,11 @@ export default function DetailScreen() {
           },
         ]}
       >
-        <View style={styles.sheetHeaderContainer}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={{ flex: 1 }}
+        >
+          <View style={styles.sheetHeaderContainer}>
           <View style={[styles.handleBar, { backgroundColor: colors.border }]} />
         </View>
 
@@ -1474,8 +1475,9 @@ export default function DetailScreen() {
       </ScrollView>
 
         )}
+        </KeyboardAvoidingView>
       </Animated.View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
