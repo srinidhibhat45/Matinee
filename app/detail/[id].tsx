@@ -971,7 +971,7 @@ export default function DetailScreen() {
         {/* Main Info */}
         <View style={styles.mainInfo}>
           <View style={styles.posterRow}>
-            {details.posterPath && (
+            {!!details.posterPath && (
               <Image
                 source={{ uri: getImageUrl(details.posterPath, 'w342') || "" }}
                 style={[styles.poster, { backgroundColor: colors.card }]}
@@ -1015,7 +1015,7 @@ export default function DetailScreen() {
               </View>
 
               {/* User Rating */}
-              {userRating && (
+              {!!userRating && (
                 <View style={[styles.userRatingBadge, { backgroundColor: colors.accentMuted }]}>
                   <Text style={[styles.userRatingText, { color: colors.accent }]}>Your: {userRating}/10</Text>
                 </View>
@@ -1182,7 +1182,7 @@ export default function DetailScreen() {
         </View>
 
         {/* Calendar Button for upcoming */}
-        {details.releaseDate && new Date(details.releaseDate) > new Date() && (
+        {!!(details.releaseDate && new Date(details.releaseDate) > new Date()) && (
           <TouchableOpacity
             style={[styles.calendarRow, { backgroundColor: colors.accentMuted, borderColor: colors.accent }]}
             onPress={handleCalendar}
@@ -1195,7 +1195,7 @@ export default function DetailScreen() {
         {/* Detailed Stats Grid */}
         <View style={styles.statsGrid}>
           {directors.length > 0 ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Director</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {directors.map((d: any) => d.name).join(', ')}
@@ -1203,7 +1203,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {cast.length > 0 ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Starring</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {cast.slice(0, 3).map((c) => c.name).join(', ')}
@@ -1211,7 +1211,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {details.status ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Status</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {details.status}
@@ -1219,7 +1219,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {details.originalLanguage ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Language</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {details.originalLanguage.toUpperCase()}
@@ -1227,7 +1227,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {mediaType === 'movie' && details.budget ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Budget</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 ${(details.budget / 1000000).toFixed(1)}M
@@ -1235,7 +1235,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {mediaType === 'movie' && details.revenue ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Revenue</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 ${(details.revenue / 1000000).toFixed(1)}M
@@ -1243,7 +1243,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {mediaType === 'tv' && details.numberOfSeasons ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Seasons</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {details.numberOfSeasons}
@@ -1251,7 +1251,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {mediaType === 'tv' && details.numberOfEpisodes ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Episodes</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {details.numberOfEpisodes}
@@ -1259,7 +1259,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {details.popularity ? (
-            <View style={styles.statGridItem}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Popularity Rank</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {Math.round(details.popularity).toLocaleString()}
@@ -1802,11 +1802,9 @@ const styles = StyleSheet.create({
   },
   statGridItem: {
     width: '47%',
-    backgroundColor: '#161621',
     borderRadius: 10,
     padding: 10,
     borderWidth: 0.5,
-    borderColor: '#2C2C35',
   },
   statGridLabel: {
     fontSize: 10,
@@ -2131,7 +2129,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 8,
     paddingHorizontal: 12,
-    marginHorizontal: 16,
+    marginHorizontal: 20,
     marginBottom: 12,
     borderRadius: 8,
     borderWidth: 0.5,
