@@ -522,11 +522,12 @@ export const tmdbService = {
   async getTrending(
     mediaType: 'movie' | 'tv' | 'all' = 'all',
     timeWindow: 'day' | 'week' = 'week',
+    page: number = 1,
   ): Promise<PaginatedResponse<TMDBMediaItem>> {
-    const cacheKey = `trending:${mediaType}:${timeWindow}`;
+    const cacheKey = `trending:${mediaType}:${timeWindow}:${page}`;
     const raw = await tmdbFetch<RawPage>(
       `/trending/${mediaType}/${timeWindow}`,
-      {},
+      { page: String(page) },
       cacheKey,
     );
     const normalizer =

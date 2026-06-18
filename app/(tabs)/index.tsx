@@ -131,7 +131,16 @@ export default function DiscoverScreen() {
       let recsPromise;
 
       if (activeTab === 'all') {
-        trendingPromise = tmdbService.getTrending('all', 'week');
+        trendingPromise = Promise.all([
+          tmdbService.getTrending('all', 'day', 1),
+          tmdbService.getTrending('all', 'day', 2),
+          tmdbService.getTrending('all', 'day', 3),
+          tmdbService.getTrending('all', 'day', 4),
+          tmdbService.getTrending('all', 'day', 5),
+        ]).then((pages) => {
+          const merged = pages.flatMap((p) => p?.results || []);
+          return { results: merged };
+        });
         
         popularPromise = Promise.all([
           tmdbService.getPopular('movie'),
@@ -154,7 +163,16 @@ export default function DiscoverScreen() {
         recsPromise = recommendationService.getPersonalizedRecommendations(120, undefined);
       } else {
         const mediaType: MediaType = activeTab === 'series' ? 'tv' : 'movie';
-        trendingPromise = tmdbService.getTrending(mediaType, 'week');
+        trendingPromise = Promise.all([
+          tmdbService.getTrending(mediaType, 'day', 1),
+          tmdbService.getTrending(mediaType, 'day', 2),
+          tmdbService.getTrending(mediaType, 'day', 3),
+          tmdbService.getTrending(mediaType, 'day', 4),
+          tmdbService.getTrending(mediaType, 'day', 5),
+        ]).then((pages) => {
+          const merged = pages.flatMap((p) => p?.results || []);
+          return { results: merged };
+        });
         popularPromise = tmdbService.getPopular(mediaType);
         topRatedPromise = tmdbService.getTopRated(mediaType);
         recsPromise = recommendationService.getPersonalizedRecommendations(120, mediaType);
