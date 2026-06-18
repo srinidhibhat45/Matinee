@@ -130,7 +130,7 @@ export default function MovieCard({
 
           {item.certification && (
             <View style={[styles.certBadge, { backgroundColor: 'rgba(10, 10, 15, 0.85)', borderColor: colors.border }]}>
-              <Text style={[styles.certBadgeText, { color: colors.text }]}>{item.certification}</Text>
+              <Text style={[styles.certBadgeText, { color: '#FFFFFF' }]}>{item.certification}</Text>
             </View>
           )}
 
@@ -148,7 +148,7 @@ export default function MovieCard({
 
           {showMediaTypeBadge && (
             <View style={[styles.mediaTypeBadge, { backgroundColor: 'rgba(10, 10, 15, 0.85)', borderColor: colors.border }]}>
-              <Text style={[styles.mediaTypeText, { color: item.mediaType === 'tv' ? colors.accent : colors.text }]}>
+              <Text style={[styles.mediaTypeText, { color: item.mediaType === 'tv' ? colors.accent : '#FFFFFF' }]}>
                 {item.mediaType === 'tv' ? 'Series' : 'Movie'}
               </Text>
             </View>

@@ -601,7 +601,7 @@ export default function DiscoverScreen() {
           )}
           {item.certification ? (
             <View style={[styles.certBadgeGrid, { backgroundColor: 'rgba(10, 10, 15, 0.85)', borderColor: colors.border }]}>
-              <Text style={[styles.certBadgeTextGrid, { color: colors.text }]}>{item.certification}</Text>
+              <Text style={[styles.certBadgeTextGrid, { color: '#FFFFFF' }]}>{item.certification}</Text>
             </View>
           ) : null}
           {item.voteAverage > 0 && (
@@ -615,7 +615,7 @@ export default function DiscoverScreen() {
             const type = item.mediaType || (item.releaseDate ? 'movie' : 'tv');
             return (
               <View style={[styles.gridMediaBadge, { backgroundColor: 'rgba(10, 10, 15, 0.85)', borderColor: colors.border }]}>
-                <Text style={[styles.gridMediaText, { color: type === 'tv' ? colors.accent : colors.text }]}>
+                <Text style={[styles.gridMediaText, { color: type === 'tv' ? colors.accent : '#FFFFFF' }]}>
                   {type === 'tv' ? 'Series' : 'Movie'}
                 </Text>
               </View>
