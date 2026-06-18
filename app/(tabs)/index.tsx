@@ -110,6 +110,17 @@ export default function DiscoverScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const lastFetchedRef = useRef(0);
 
+  const uniqueList = useCallback((list: any[]) => {
+    const seen = new Set();
+    return list.filter((item) => {
+      if (!item) return false;
+      const key = `${item.id}-${item.mediaType || 'movie'}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, []);
+
   const fetchHomeData = useCallback(async (isSilent = false) => {
     try {
       if (!isSilent) {
@@ -188,36 +199,38 @@ export default function DiscoverScreen() {
 
       if (trendingRes.status === 'fulfilled') {
         const list = trendingRes.value?.results || [];
-        setTrending(list.filter((m) => !skipIds.has(m.id) && langs.includes(m.originalLanguage)));
+        setTrending(uniqueList(list.filter((m) => !skipIds.has(m.id) && langs.includes(m.originalLanguage))));
       }
       if (popularRes.status === 'fulfilled') {
         const list = popularRes.value?.results || [];
-        setPopular(list.filter((m) => !skipIds.has(m.id) && langs.includes(m.originalLanguage)));
+        setPopular(uniqueList(list.filter((m) => !skipIds.has(m.id) && langs.includes(m.originalLanguage))));
       }
       if (topRatedRes.status === 'fulfilled') {
         const list = topRatedRes.value?.results || [];
-        setTopRated(list.filter((m) => !skipIds.has(m.id) && langs.includes(m.originalLanguage)));
+        setTopRated(uniqueList(list.filter((m) => !skipIds.has(m.id) && langs.includes(m.originalLanguage))));
       }
       if (recentRes.status === 'fulfilled') {
         const items = recentRes.value || [];
         // Recently logged movies/shows are EXEMPT from preferred language filtering
         setRecentlyWatched(
-          items
-            .filter((i: any) => activeTab === 'all' || i.mediaType === (activeTab === 'series' ? 'tv' : 'movie'))
-            .map((i: any) => ({
-              id: i.tmdbId,
-              title: i.title,
-              posterPath: i.posterPath,
-              voteAverage: i.voteAverage,
-              releaseDate: i.releaseDate,
-              mediaType: i.mediaType,
-            }))
+          uniqueList(
+            items
+              .filter((i: any) => activeTab === 'all' || i.mediaType === (activeTab === 'series' ? 'tv' : 'movie'))
+              .map((i: any) => ({
+                id: i.tmdbId,
+                title: i.title,
+                posterPath: i.posterPath,
+                voteAverage: i.voteAverage,
+                releaseDate: i.releaseDate,
+                mediaType: i.mediaType,
+              }))
+          )
         );
       }
       if (recsRes.status === 'fulfilled') {
         const recs = recsRes.value || [];
         setRecommendations(
-          recs.filter((r: RecommendedItem) => !skipIds.has(r.id))
+          uniqueList(recs.filter((r: RecommendedItem) => !skipIds.has(r.id)))
         );
       }
       lastFetchedRef.current = Date.now();
@@ -381,7 +394,7 @@ export default function DiscoverScreen() {
       try {
         setSearchPage(1);
         const result = await tmdbService.search(query, undefined, 1);
-        setSearchResults(result?.results || []);
+        setSearchResults(uniqueList(result?.results || []));
         setSearchTotalPages(result?.totalPages || 1);
       } catch {
         setSearchResults([]);
