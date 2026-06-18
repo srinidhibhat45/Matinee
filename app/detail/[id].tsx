@@ -173,6 +173,7 @@ export default function DetailScreen() {
   const [watchYear, setWatchYear] = useState(String(today.getFullYear()));
 
   const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  const [keyboardAvoidingEnabled, setKeyboardAvoidingEnabled] = useState(false);
 
   useEffect(() => {
     Animated.spring(slideAnim, {
@@ -180,7 +181,11 @@ export default function DetailScreen() {
       useNativeDriver: true,
       tension: 65,
       friction: 11,
-    }).start();
+    }).start(({ finished }) => {
+      if (finished) {
+        setKeyboardAvoidingEnabled(true);
+      }
+    });
   }, []);
 
   const handleClose = useCallback(() => {
@@ -690,6 +695,7 @@ export default function DetailScreen() {
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={{ flex: 1 }}
+          enabled={keyboardAvoidingEnabled}
         >
           <View style={styles.sheetHeaderContainer}>
           <View style={[styles.handleBar, { backgroundColor: colors.border }]} />
