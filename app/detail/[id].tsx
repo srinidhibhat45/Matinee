@@ -14,6 +14,7 @@ import {
   Pressable,
   KeyboardAvoidingView,
   Platform,
+  ToastAndroid,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -522,6 +523,9 @@ export default function DetailScreen() {
         });
         setItemStatus('watched');
         setUserRating(overallRating);
+        if (Platform.OS === 'android') {
+          ToastAndroid.show('Rating saved successfully! 🍿', ToastAndroid.SHORT);
+        }
       }
     } catch (err) {
       console.error('Rating error:', err);
