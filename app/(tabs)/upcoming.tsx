@@ -88,21 +88,60 @@ export default function UpcomingScreen() {
       const res = await tmdbService.getUpcomingByLanguages(selectedLanguages, pageNum);
       const rawResults = res?.results || [];
 
-      // Decorate with full details (runtime, watch providers, certification)
+      // Decorate with full details (runtime, watch providers, certification, upcoming TV events)
       const results = await Promise.all(
         rawResults.map(async (item) => {
           try {
             const details = await tmdbService.getDetails(item.id, item.mediaType || 'movie');
             if (details) {
+              let updatedReleaseDate = item.releaseDate;
+              let upcomingEventTitle: string | undefined = undefined;
+
+              if (item.mediaType === 'tv') {
+                const todayStr = new Date().toISOString().split('T')[0];
+                let upcomingDate: string | null = null;
+                let eventTitle: string | null = null;
+
+                // 1. Check nextEpisodeToAir
+                if (details.nextEpisodeToAir && details.nextEpisodeToAir.air_date >= todayStr) {
+                  upcomingDate = details.nextEpisodeToAir.air_date;
+                  const { season_number, episode_number } = details.nextEpisodeToAir;
+                  if (episode_number === 1) {
+                    eventTitle = `Season ${season_number} Premiere`;
+                  } else {
+                    eventTitle = `Season ${season_number}, Ep ${episode_number}`;
+                  }
+                }
+                // 2. Otherwise, check seasons list for future season air dates
+                if (!upcomingDate && details.seasons) {
+                  const futureSeasons = details.seasons
+                    .filter((s: any) => s.season_number > 0 && s.air_date && s.air_date >= todayStr)
+                    .sort((a: any, b: any) => a.season_number - b.season_number);
+                  if (futureSeasons.length > 0) {
+                    upcomingDate = futureSeasons[0].air_date;
+                    eventTitle = `Season ${futureSeasons[0].season_number} Premiere`;
+                  }
+                }
+
+                if (upcomingDate) {
+                  updatedReleaseDate = upcomingDate;
+                  upcomingEventTitle = eventTitle || undefined;
+                } else if (item.releaseDate && item.releaseDate >= todayStr) {
+                  upcomingEventTitle = 'Series Premiere';
+                }
+              }
+
               return {
                 ...item,
                 runtime: details.runtime,
                 certification: details.certification,
                 watchProviders: details.watchProviders,
+                releaseDate: updatedReleaseDate,
+                upcomingEventTitle,
               };
             }
           } catch (err) {
-            console.error(`Failed to load details for upcoming movie ${item.id}:`, err);
+            console.error(`Failed to load details for upcoming item ${item.id}:`, err);
           }
           return item;
         })
@@ -466,7 +505,17 @@ export default function UpcomingScreen() {
                 </View>
                 
                 <View style={styles.dateRuntimeRow}>
-                  <Text style={[styles.cardDate, { color: colors.accent }]}>{releaseDate}</Text>
+                  {item.upcomingEventTitle ? (
+                    <>
+                      <Text style={[styles.cardDate, { color: colors.accent, fontWeight: '700' }]}>
+                        {item.upcomingEventTitle}
+                      </Text>
+                      <Text style={[styles.cardMetaDot, { color: colors.muted }]}>·</Text>
+                      <Text style={[styles.cardDate, { color: colors.secondary }]}>{releaseDate}</Text>
+                    </>
+                  ) : (
+                    <Text style={[styles.cardDate, { color: colors.accent }]}>{releaseDate}</Text>
+                  )}
                   {runtimeStr ? (
                     <>
                       <Text style={[styles.cardMetaDot, { color: colors.muted }]}>·</Text>

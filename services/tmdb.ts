@@ -696,6 +696,15 @@ export const tmdbService = {
       watchProviders,
       seasons: raw.seasons ?? [],
       certification: extractCertification(raw, mediaType),
+      nextEpisodeToAir: raw.next_episode_to_air
+        ? {
+            id: raw.next_episode_to_air.id,
+            name: raw.next_episode_to_air.name,
+            air_date: raw.next_episode_to_air.air_date,
+            episode_number: raw.next_episode_to_air.episode_number,
+            season_number: raw.next_episode_to_air.season_number,
+          }
+        : null,
     };
   },
 
@@ -849,12 +858,12 @@ export const tmdbService = {
       with_crew: filters.withCrew,
       'primary_release_date.gte': filters.releaseDateGte,
       'primary_release_date.lte': filters.releaseDateLte,
-      // TV uses first_air_date instead
+      // TV uses air_date to discover both new and returning seasons
       ...(mediaType === 'tv' && filters.releaseDateGte
-        ? { 'first_air_date.gte': filters.releaseDateGte }
+        ? { 'air_date.gte': filters.releaseDateGte }
         : {}),
       ...(mediaType === 'tv' && filters.releaseDateLte
-        ? { 'first_air_date.lte': filters.releaseDateLte }
+        ? { 'air_date.lte': filters.releaseDateLte }
         : {}),
     };
 
@@ -983,13 +992,31 @@ export const tmdbService = {
 
     // Fetch each language in parallel
     const fetches = languages.map(async (lang) => {
-      const result = await this.discover('movie', {
-        withOriginalLanguage: lang,
-        releaseDateGte: today,
-        releaseDateLte: futureDate,
-        sortBy: 'primary_release_date.asc',
-      }, page);
-      return result;
+      try {
+        const [movieRes, tvRes] = await Promise.all([
+          this.discover('movie', {
+            withOriginalLanguage: lang,
+            releaseDateGte: today,
+            releaseDateLte: futureDate,
+            sortBy: 'primary_release_date.asc',
+          }, page),
+          this.discover('tv', {
+            withOriginalLanguage: lang,
+            releaseDateGte: today,
+            releaseDateLte: futureDate,
+            sortBy: 'popularity.desc',
+          }, page),
+        ]);
+
+        return {
+          results: [...(movieRes?.results || []), ...(tvRes?.results || [])],
+          totalPages: Math.max(movieRes?.totalPages || 0, tvRes?.totalPages || 0),
+          totalResults: (movieRes?.totalResults || 0) + (tvRes?.totalResults || 0),
+        };
+      } catch (err) {
+        console.error('getUpcomingByLanguages error for lang:', lang, err);
+        return { results: [], totalPages: 0, totalResults: 0 };
+      }
     });
 
     const results = await Promise.all(fetches);
@@ -1000,16 +1027,17 @@ export const tmdbService = {
       maxResults += result.totalResults;
     }
 
-    // Deduplicate by ID
-    const seen = new Set<number>();
+    // Deduplicate by ID and Media Type
+    const seen = new Set<string>();
     const unique = allResults.filter((item) => {
-      if (seen.has(item.id)) return false;
-      seen.add(item.id);
+      const key = `${item.mediaType || 'movie'}-${item.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
 
     // Sort by release date ascending
-    unique.sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
+    unique.sort((a, b) => (a.releaseDate || '').localeCompare(b.releaseDate || ''));
 
     return {
       page,
@@ -1017,6 +1045,16 @@ export const tmdbService = {
       totalPages: maxPages,
       totalResults: maxResults,
     };
+  },
+
+  /**
+   * Get episodes for a specific TV show season.
+   */
+  async getTVSeason(seriesId: number, seasonNumber: number): Promise<any> {
+    const cacheKey = `tv:${seriesId}:season:${seasonNumber}`;
+    const endpoint = `/tv/${seriesId}/season/${seasonNumber}`;
+    const raw = await tmdbFetch<any>(endpoint, {}, cacheKey, CACHE_TTL.details);
+    return raw;
   },
 
   // ── Genres ────────────────────────────────────────────

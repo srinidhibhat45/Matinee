@@ -57,6 +57,7 @@ export interface TMDBMediaItem {
   certification?: string | null;
   runtime?: number | null;
   watchProviders?: WatchProviderResult | null;
+  upcomingEventTitle?: string;
 }
 
 // ─── Detail Types ────────────────────────────────────────────
@@ -246,6 +247,13 @@ export interface TMDBMediaDetails extends TMDBMediaItem {
   videos: Video[];
   watchProviders: WatchProviderResult | null;
   seasons: Season[];
+  nextEpisodeToAir?: {
+    id: number;
+    name: string;
+    air_date: string;
+    episode_number: number;
+    season_number: number;
+  } | null;
 }
 
 // ─── Person Details ─────────────────────────────────────────

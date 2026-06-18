@@ -62,6 +62,26 @@ const DETAIL_CATEGORIES = [
   { key: 'rewatchability', label: 'Rewatchability', icon: 'refresh-outline' as const },
 ];
 
+const formatEpisodeAirDate = (dateStr: string | null) => {
+  if (!dateStr) return 'TBA';
+  try {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  } catch {
+    return dateStr;
+  }
+};
+
+const isEpFuture = (dateStr: string | null) => {
+  if (!dateStr) return true;
+  const todayStr = new Date().toISOString().split('T')[0];
+  return dateStr > todayStr;
+};
+
 function SimpleStarRow({
   rating,
   onRate,
@@ -251,6 +271,11 @@ export default function DetailScreen() {
   const [episodeReviewInput, setEpisodeReviewInput] = useState('');
   const [isLoggingEpisode, setIsLoggingEpisode] = useState(false);
 
+  // Seasons & Episodes states
+  const [activeSeasonNumber, setActiveSeasonNumber] = useState<number | null>(null);
+  const [seasonEpisodes, setSeasonEpisodes] = useState<Record<number, any[]>>({});
+  const [episodesLoading, setEpisodesLoading] = useState(false);
+
   const hasAutoRated = React.useRef(false);
   useEffect(() => {
     if (details && autoRate === 'true' && !hasAutoRated.current) {
@@ -279,6 +304,16 @@ export default function DetailScreen() {
           setEpisodeRatings(epRatings);
         }
       }
+
+      // Initialize active season number
+      if (mediaType === 'tv' && data?.seasons && data.seasons.length > 0) {
+        const regularSeasons = data.seasons.filter((s: any) => s.season_number > 0);
+        if (regularSeasons.length > 0) {
+          setActiveSeasonNumber(regularSeasons[0].season_number);
+        } else {
+          setActiveSeasonNumber(data.seasons[0].season_number);
+        }
+      }
     } catch (err) {
       console.error('Detail fetch error:', err);
     } finally {
@@ -289,6 +324,37 @@ export default function DetailScreen() {
   useEffect(() => {
     fetchDetails();
   }, [fetchDetails]);
+
+  // Lazily load episodes when activeSeasonNumber changes
+  useEffect(() => {
+    if (mediaType !== 'tv' || activeSeasonNumber === null) return;
+    if (seasonEpisodes[activeSeasonNumber]) return;
+
+    let isMounted = true;
+    const loadSeasonEpisodes = async () => {
+      try {
+        setEpisodesLoading(true);
+        const data = await tmdbService.getTVSeason(tmdbId, activeSeasonNumber);
+        if (isMounted && data?.episodes) {
+          setSeasonEpisodes((prev) => ({
+            ...prev,
+            [activeSeasonNumber]: data.episodes,
+          }));
+        }
+      } catch (err) {
+        console.error('Failed to load season episodes:', err);
+      } finally {
+        if (isMounted) {
+          setEpisodesLoading(false);
+        }
+      }
+    };
+
+    loadSeasonEpisodes();
+    return () => {
+      isMounted = false;
+    };
+  }, [tmdbId, mediaType, activeSeasonNumber]);
 
   const handleAction = useCallback(
     async (status: 'watched' | 'watchlist' | 'interested' | 'not_interested') => {
@@ -618,6 +684,11 @@ export default function DetailScreen() {
     id,
     name: getGenreName(id, mediaType),
   })) || [];
+
+  const tvSeasons = details.seasons
+    ? [...details.seasons].sort((a: any, b: any) => a.season_number - b.season_number)
+    : [];
+  const episodes = activeSeasonNumber !== null ? seasonEpisodes[activeSeasonNumber] : null;
 
   const providers = [
     ...(details.watchProviders?.flatrate || []),
@@ -1322,6 +1393,135 @@ export default function DetailScreen() {
                 </View>
               ))}
             </ScrollView>
+          </View>
+        )}
+
+        {/* Seasons & Episodes directory for TV Series */}
+        {mediaType === 'tv' && tvSeasons.length > 0 && (
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 12 }]}>Seasons & Episodes</Text>
+            
+            {/* Season tabs */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: 8, paddingBottom: 8 }}
+            >
+              {tvSeasons.map((season) => {
+                const isActive = activeSeasonNumber === season.season_number;
+                return (
+                  <TouchableOpacity
+                    key={season.id}
+                    style={[
+                      styles.seasonTabBtn,
+                      { backgroundColor: colors.card, borderColor: colors.border },
+                      isActive && { backgroundColor: colors.accent, borderColor: colors.accent },
+                    ]}
+                    onPress={() => {
+                      setActiveSeasonNumber(season.season_number);
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.seasonTabText,
+                        { color: colors.secondary },
+                        isActive && { color: colors.bg, fontWeight: '700' },
+                      ]}
+                    >
+                      {season.name || `Season ${season.season_number}`}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            {/* Episodes List */}
+            <View style={[styles.episodesContainer, { marginTop: 12 }]}>
+              {episodesLoading ? (
+                <ActivityIndicator size="small" color={colors.accent} style={{ marginVertical: 24 }} />
+              ) : episodes && episodes.length > 0 ? (
+                <View style={styles.episodesList}>
+                  {episodes.map((ep) => {
+                    const isFuture = isEpFuture(ep.air_date);
+                    const userEpRating = episodeRatings.find(
+                      (r) => r.seasonNumber === activeSeasonNumber && r.episodeNumber === ep.episode_number
+                    )?.rating;
+
+                    return (
+                      <TouchableOpacity
+                        key={ep.id}
+                        style={[styles.episodeRow, { borderBottomColor: colors.border }]}
+                        activeOpacity={0.7}
+                        onPress={() => {
+                          if (!isFuture) {
+                            setSeasonInput(String(activeSeasonNumber));
+                            setEpisodeInput(String(ep.episode_number));
+                            if (Platform.OS === 'android') {
+                              ToastAndroid.show(`Selected S${activeSeasonNumber} E${ep.episode_number} for logging`, ToastAndroid.SHORT);
+                            }
+                          }
+                        }}
+                      >
+                        {/* Still Image */}
+                        <View style={styles.epStillContainer}>
+                          {ep.still_path ? (
+                            <Image
+                              source={{ uri: getImageUrl(ep.still_path, 'w185') || "" }}
+                              style={styles.epStill}
+                              resizeMode="cover"
+                            />
+                          ) : (
+                            <View style={[styles.epStill, styles.epStillPlaceholder, { backgroundColor: colors.card }]}>
+                              <Ionicons name="image-outline" size={20} color={colors.muted} />
+                            </View>
+                          )}
+                          <View style={[styles.epNumberBadge, { backgroundColor: 'rgba(0,0,0,0.7)' }]}>
+                            <Text style={styles.epNumberText}>Ep {ep.episode_number}</Text>
+                          </View>
+                        </View>
+
+                        {/* Episode Info */}
+                        <View style={styles.epInfo}>
+                          <View style={styles.epTitleRow}>
+                            <Text style={[styles.epTitle, { color: colors.text }]} numberOfLines={1}>
+                              {ep.name || `Episode ${ep.episode_number}`}
+                            </Text>
+                            {userEpRating !== undefined && (
+                              <View style={[styles.epUserRatingBadge, { backgroundColor: colors.accentMuted }]}>
+                                <Ionicons name="star" size={10} color={colors.accent} />
+                                <Text style={[styles.epUserRatingText, { color: colors.accent }]}>
+                                  {userEpRating.toFixed(1)}
+                                </Text>
+                              </View>
+                            )}
+                          </View>
+
+                          <Text
+                            style={[
+                              styles.epAirDate,
+                              { color: isFuture ? colors.accent : colors.secondary }
+                            ]}
+                          >
+                            {isFuture ? `Airing: ${formatEpisodeAirDate(ep.air_date)}` : formatEpisodeAirDate(ep.air_date)}
+                          </Text>
+
+                          {ep.overview ? (
+                            <Text style={[styles.epOverview, { color: colors.muted }]} numberOfLines={2}>
+                              {ep.overview}
+                            </Text>
+                          ) : null}
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ) : (
+                <Text style={[styles.emptyEpisodesText, { color: colors.muted }]}>
+                  No episodes found for this season.
+                </Text>
+              )}
+            </View>
           </View>
         )}
 
@@ -2143,5 +2343,98 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '500',
     flex: 1,
+  },
+  seasonTabBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  seasonTabText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  episodesContainer: {
+    width: '100%',
+  },
+  episodesList: {
+    gap: 12,
+  },
+  episodeRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 0.5,
+  },
+  epStillContainer: {
+    position: 'relative',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  epStill: {
+    width: 100,
+    height: 62,
+    borderRadius: 8,
+  },
+  epStillPlaceholder: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  epNumberBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  epNumberText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  epInfo: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  epTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  epTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    flex: 1,
+  },
+  epUserRatingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  epUserRatingText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  epAirDate: {
+    fontSize: 12,
+    marginTop: 2,
+    marginBottom: 4,
+  },
+  epOverview: {
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  emptyEpisodesText: {
+    fontSize: 14,
+    textAlign: 'center',
+    paddingVertical: 20,
   },
 });
