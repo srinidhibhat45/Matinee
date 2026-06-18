@@ -6,3 +6,5 @@
 - [x] Implement search pagination (lazy loading) on frontend (`app/(tabs)/index.tsx`)
 - [x] Implement client-side search sorting and filtering bottom sheet (`app/(tabs)/index.tsx`)
 - [x] Implement "See All" modal for Recommendations grid (`app/(tabs)/index.tsx`)
+- [x] Create comprehensive README with CI/CD build details, versioning, and download instructions, and push to remote repository
+
