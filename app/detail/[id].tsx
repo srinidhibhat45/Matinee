@@ -12,6 +12,8 @@ import {
   TextInput,
   Animated,
   Pressable,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -283,7 +285,7 @@ export default function DetailScreen() {
   }, [fetchDetails]);
 
   const handleAction = useCallback(
-    async (status: 'watched' | 'watchlist' | 'interested') => {
+    async (status: 'watched' | 'watchlist' | 'interested' | 'not_interested') => {
       try {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
@@ -318,7 +320,7 @@ export default function DetailScreen() {
         setItemStatus(status);
 
         // Save directors and actors for recommendation engine
-        if (details.credits) {
+        if (status !== 'not_interested' && details.credits) {
           const { saveDirectorsActors } = require('../../services/database');
           const existing = await getItem(tmdbId);
           if (existing) {
@@ -673,7 +675,10 @@ export default function DetailScreen() {
   };
 
   return (
-    <View style={styles.overlayContainer}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={styles.overlayContainer}
+    >
       <Pressable style={styles.modalBackdrop} onPress={handleClose} />
       <Animated.View
         style={[
@@ -1133,6 +1138,31 @@ export default function DetailScreen() {
             <Ionicons name="musical-notes" size={20} color="#FF0000" />
             <Text style={[styles.actionButtonText, { color: colors.text }]}>Soundtrack</Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.actionButton,
+              { backgroundColor: colors.card, borderColor: colors.border },
+              itemStatus === 'not_interested' && { borderColor: colors.accent, backgroundColor: colors.accentMuted },
+            ]}
+            onPress={() => handleAction('not_interested')}
+            activeOpacity={0.7}
+          >
+            <Ionicons
+              name={itemStatus === 'not_interested' ? 'eye-off' : 'eye-off-outline'}
+              size={20}
+              color={itemStatus === 'not_interested' ? colors.accent : colors.text}
+            />
+            <Text
+              style={[
+                styles.actionButtonText,
+                { color: colors.text },
+                itemStatus === 'not_interested' && { color: colors.accent },
+              ]}
+            >
+              No Interest
+            </Text>
+          </TouchableOpacity>
         </View>
 
         {/* Calendar Button for upcoming */}
@@ -1445,7 +1475,7 @@ export default function DetailScreen() {
 
         )}
       </Animated.View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 

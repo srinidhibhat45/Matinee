@@ -143,13 +143,13 @@ export default function DiscoverScreen() {
           return { results: merged };
         });
 
-        recsPromise = recommendationService.getPersonalizedRecommendations(60, undefined);
+        recsPromise = recommendationService.getPersonalizedRecommendations(120, undefined);
       } else {
         const mediaType: MediaType = activeTab === 'series' ? 'tv' : 'movie';
         trendingPromise = tmdbService.getTrending(mediaType, 'week');
         popularPromise = tmdbService.getPopular(mediaType);
         topRatedPromise = tmdbService.getTopRated(mediaType);
-        recsPromise = recommendationService.getPersonalizedRecommendations(60, mediaType);
+        recsPromise = recommendationService.getPersonalizedRecommendations(120, mediaType);
       }
 
       const [trendingRes, popularRes, topRatedRes, recentRes, recsRes] = await Promise.allSettled([
@@ -640,7 +640,7 @@ export default function DiscoverScreen() {
           numColumns={3}
           columnWrapperStyle={styles.gridRow}
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 100 }}
+          contentContainerStyle={{ paddingBottom: 100 }}
           ListEmptyComponent={
             <View style={styles.emptySearch}>
               <Text style={[styles.emptyText, { color: colors.muted }]}>No recommendations available</Text>
@@ -1343,7 +1343,7 @@ const styles = StyleSheet.create({
   },
   gridRow: {
     paddingHorizontal: 16,
-    gap: 8,
+    gap: 6,
   },
   gridCard: {
     width: CARD_WIDTH,

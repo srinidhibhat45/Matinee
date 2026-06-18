@@ -1749,7 +1749,11 @@ export async function getWatchedPeople(): Promise<PersonEntry[]> {
       person_name: string;
       role: string;
       profile_path: string | null;
-    }>('SELECT item_id, person_id, person_name, role, profile_path FROM director_actor_cache');
+    }>(
+      `SELECT d.item_id, d.person_id, d.person_name, d.role, d.profile_path
+       FROM director_actor_cache d
+       INNER JOIN watched_items w ON w.id = d.item_id AND w.status = 'watched'`
+    );
     return rows.map((r) => ({
       itemId: r.item_id,
       personId: r.person_id,

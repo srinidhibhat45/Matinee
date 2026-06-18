@@ -14,7 +14,7 @@ class RecommendationService {
   /**
    * Get personalized recommendations combining multiple signals.
    */
-  async getPersonalizedRecommendations(limit: number = 60, mediaType?: MediaType): Promise<RecommendedItem[]> {
+  async getPersonalizedRecommendations(limit: number = 120, mediaType?: MediaType): Promise<RecommendedItem[]> {
     try {
       // Check if user has enough data
       const watchedItems = await getAllItems('watched');
@@ -662,7 +662,7 @@ class RecommendationService {
   /**
    * Cold start: trending and popular content tailored to user settings languages with multiplexing.
    */
-  async getRecommendationsForNewUser(limit: number = 60, mediaType?: MediaType): Promise<RecommendedItem[]> {
+  async getRecommendationsForNewUser(limit: number = 120, mediaType?: MediaType): Promise<RecommendedItem[]> {
     try {
       const langPref = await getPreference('PREF_LANGUAGES');
       const preferredLanguages: string[] = langPref
