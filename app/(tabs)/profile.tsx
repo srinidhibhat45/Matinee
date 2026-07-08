@@ -39,11 +39,13 @@ import {
   deleteItem,
 } from '../../services/database';
 import { cloudSync } from '../../services/cloudSync';
-import { isFirebaseConfigured } from '../../services/firebase';
+import { isFirebaseConfigured, bindKeys, lookupKey, handleKeyAutofill } from '../../services';
 import { WatchedItem, ItemStatus, MediaType } from '../../types';
 import { LANGUAGES, DEFAULT_LANGUAGES } from '../../constants/languages';
+import { COUNTRIES } from '../../constants/providers';
+import { OTT_PROVIDERS } from '../../constants/providers';
 
-type LibraryTab = 'watchlist' | 'watched' | 'interested';
+type LibraryTab = 'watchlist' | 'watched';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - 32 - 12) / 3; // 32px padding + 2×6px gaps
@@ -60,7 +62,6 @@ export default function ProfileScreen() {
   const [counts, setCounts] = useState<Record<LibraryTab, number>>({
     watched: 0,
     watchlist: 0,
-    interested: 0,
   });
   const [confirmModal, setConfirmModal] = useState<{
     visible: boolean;
@@ -96,17 +97,15 @@ export default function ProfileScreen() {
       
       const watched = allData.filter((i) => i.status === 'watched');
       const watchlist = allData.filter((i) => i.status === 'watchlist');
-      const interested = allData.filter((i) => i.status === 'interested');
 
       setCounts({
         watched: watched.length,
         watchlist: watchlist.length,
-        interested: interested.length,
       });
 
       if (activeTab === 'watched') {
         setItems(watched);
-      } else if (activeTab === 'watchlist') {
+      } else {
         const now = new Date();
         const upcoming = watchlist.filter((item) => {
           if (!item.releaseDate) return false;
@@ -134,8 +133,6 @@ export default function ProfileScreen() {
         });
 
         setItems([...upcoming, ...released]);
-      } else {
-        setItems(interested);
       }
     } catch (err) {
       console.error('Fetch library items error:', err);
@@ -208,6 +205,12 @@ export default function ProfileScreen() {
   // Preferences states
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
   const [includeAdult, setIncludeAdult] = useState(false);
+  const [filterByCountry, setFilterByCountry] = useState(false);
+  const [userCountry, setUserCountry] = useState('US');
+  const [countryDropdownOpen, setCountryDropdownOpen] = useState(false);
+  const [selectedOttProviders, setSelectedOttProviders] = useState<number[]>([]);
+  const [geminiApiKey, setGeminiApiKey] = useState('');
+  const [savedGeminiApiKey, setSavedGeminiApiKey] = useState('');
 
   // Cloud sync states
   const [syncBusy, setSyncBusy] = useState(false);
@@ -216,7 +219,7 @@ export default function ProfileScreen() {
 
   // Sync tab/mediaType search params if they are passed
   useEffect(() => {
-    if (tab === 'watchlist' || tab === 'watched' || tab === 'interested') {
+    if (tab === 'watchlist' || tab === 'watched') {
       setActiveTab(tab);
     }
     if (mediaType === 'movie' || mediaType === 'tv') {
@@ -244,10 +247,50 @@ export default function ProfileScreen() {
       const adult = await getPreference('PREF_ADULT_CONTENT');
       setIncludeAdult(adult === 'true');
 
+      const filterByCountryVal = await getPreference('PREF_FILTER_BY_COUNTRY');
+      setFilterByCountry(filterByCountryVal === 'true');
+
+      const userCountryVal = await getPreference('PREF_USER_COUNTRY');
+      setUserCountry(userCountryVal || 'US');
+
+      const ottPref = await getPreference('PREF_OTT_PROVIDERS');
+      if (ottPref) setSelectedOttProviders(ottPref.split(',').map(Number).filter(Boolean));
+
+      const geminiKey = await getPreference('PREF_GEMINI_API_KEY');
+      if (geminiKey) {
+        setGeminiApiKey(geminiKey);
+        setSavedGeminiApiKey(geminiKey);
+      }
+
       const proxy = await tmdbService.getProxy();
       if (proxy) {
         setApiProxy(proxy);
         setSavedApiProxy(proxy);
+      }
+
+      // Handle key binding lookup / sync at load time
+      if (isFirebaseConfigured()) {
+        if (key && !geminiKey) {
+          const bound = await lookupKey(key);
+          if (bound.geminiKey) {
+            await setPreference('PREF_GEMINI_API_KEY', bound.geminiKey);
+            setGeminiApiKey(bound.geminiKey);
+            setSavedGeminiApiKey(bound.geminiKey);
+          }
+        } else if (!key && geminiKey) {
+          const bound = await lookupKey(geminiKey);
+          if (bound.tmdbKey) {
+            await setPreference('API_KEY_STORAGE', bound.tmdbKey);
+            await AsyncStorage.setItem('@matinee_api_key', bound.tmdbKey);
+            await tmdbService.setApiKey(bound.tmdbKey);
+            setApiKey(bound.tmdbKey);
+            setSavedApiKey(bound.tmdbKey);
+            cloudSync.initCloudSync(bound.tmdbKey).catch(() => {});
+          }
+        } else if (key && geminiKey) {
+          // ensure they are bound
+          bindKeys(key, geminiKey).catch(() => {});
+        }
       }
     } catch (err) {
       console.error('Load preferences error:', err);
@@ -293,19 +336,107 @@ export default function ProfileScreen() {
     }
   }, [includeAdult]);
 
+  const handleToggleFilterByCountry = useCallback(async () => {
+    try {
+      const next = !filterByCountry;
+      setFilterByCountry(next);
+      await setPreference('PREF_FILTER_BY_COUNTRY', String(next));
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch (err) {
+      console.error('Toggle filter by country error:', err);
+    }
+  }, [filterByCountry]);
+
+  const handleSelectCountry = useCallback(async (code: string) => {
+    try {
+      setUserCountry(code);
+      await setPreference('PREF_USER_COUNTRY', code);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch (err) {
+      console.error('Select country error:', err);
+    }
+  }, []);
+
+  const handleToggleOttProvider = useCallback(async (providerId: number) => {
+    try {
+      setSelectedOttProviders((prev) => {
+        const next = prev.includes(providerId)
+          ? prev.filter((id) => id !== providerId)
+          : [...prev, providerId];
+        setPreference('PREF_OTT_PROVIDERS', next.join(','));
+        return next;
+      });
+    } catch (err) {
+      console.error('Toggle OTT provider error:', err);
+    }
+  }, []);
+
+  const handleSaveGeminiApiKey = useCallback(async () => {
+    try {
+      const trimmedKey = geminiApiKey.trim();
+      await setPreference('PREF_GEMINI_API_KEY', trimmedKey);
+      setSavedGeminiApiKey(trimmedKey);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+      if (isFirebaseConfigured() && trimmedKey) {
+        const result = await handleKeyAutofill(trimmedKey, 'gemini');
+        if (result.autofilled && result.tmdbKey) {
+          setApiKey(result.tmdbKey);
+          setSavedApiKey(result.tmdbKey);
+          showCustomAlert(
+            'Success',
+            'Gemini API key saved! Bound TMDB API key was automatically retrieved from the cloud.'
+          );
+          return;
+        }
+
+        // Link with existing TMDB key if it exists
+        if (apiKey.trim()) {
+          await bindKeys(apiKey.trim(), trimmedKey);
+          showCustomAlert('Success', 'Gemini API key saved and bound with TMDB API key in the cloud.');
+          return;
+        }
+      }
+
+      showCustomAlert('Success', 'Gemini API key saved successfully');
+    } catch (err) {
+      console.error('Save Gemini API key error:', err);
+      showCustomAlert('Error', 'Failed to save Gemini API key');
+    }
+  }, [geminiApiKey, apiKey, showCustomAlert]);
+
   const handleSaveApiKey = useCallback(async () => {
     try {
-      if (!apiKey.trim()) {
+      const trimmedKey = apiKey.trim();
+      if (!trimmedKey) {
         showCustomAlert('Error', 'Please enter a valid API key');
         return;
       }
-      await setPreference('API_KEY_STORAGE', apiKey.trim());
-      setSavedApiKey(apiKey.trim());
-      tmdbService.setApiKey(apiKey.trim());
+      await setPreference('API_KEY_STORAGE', trimmedKey);
+      setSavedApiKey(trimmedKey);
+      await tmdbService.setApiKey(trimmedKey);
 
       // Re-initialise cloud sync with new key
       if (isFirebaseConfigured()) {
-        cloudSync.initCloudSync(apiKey.trim()).catch(() => {});
+        cloudSync.initCloudSync(trimmedKey).catch(() => {});
+        
+        const result = await handleKeyAutofill(trimmedKey, 'tmdb');
+        if (result.autofilled && result.geminiKey) {
+          setGeminiApiKey(result.geminiKey);
+          setSavedGeminiApiKey(result.geminiKey);
+          showCustomAlert(
+            'Success',
+            'TMDB API key saved! Bound Gemini API key was automatically retrieved from the cloud.'
+          );
+          return;
+        }
+
+        // Link with existing Gemini key if it exists
+        if (geminiApiKey.trim()) {
+          await bindKeys(trimmedKey, geminiApiKey.trim());
+          showCustomAlert('Success', 'TMDB API key saved and bound with Gemini API key in the cloud.');
+          return;
+        }
       }
 
       showCustomAlert('Success', 'API key saved successfully');
@@ -313,7 +444,7 @@ export default function ProfileScreen() {
       console.error('Save API key error:', err);
       showCustomAlert('Error', 'Failed to save API key');
     }
-  }, [apiKey, showCustomAlert]);
+  }, [apiKey, geminiApiKey, showCustomAlert]);
 
   const handleSaveApiProxy = useCallback(async () => {
     try {
@@ -366,7 +497,7 @@ export default function ProfileScreen() {
     try {
       await clearAllData();
       setItems([]);
-      setCounts({ watched: 0, watchlist: 0, interested: 0 });
+      setCounts({ watched: 0, watchlist: 0 });
       showCustomAlert('Done', 'Local data has been cleared.');
     } catch (err) {
       console.error('Clear local data error:', err);
@@ -397,16 +528,25 @@ export default function ProfileScreen() {
       await tmdbService.removeApiKey();
 
       setItems([]);
-      setCounts({ watched: 0, watchlist: 0, interested: 0 });
+      setCounts({ watched: 0, watchlist: 0 });
       setApiKey('');
       setSavedApiKey('');
       setSelectedLanguages(DEFAULT_LANGUAGES);
       setIncludeAdult(false);
+      setFilterByCountry(false);
+      setUserCountry('US');
+      setSelectedOttProviders([]);
+      setGeminiApiKey('');
+      setSavedGeminiApiKey('');
       setLastSyncDisplay(null);
       
       await setPreference('API_KEY_STORAGE', '');
       await setPreference('PREF_LANGUAGES', DEFAULT_LANGUAGES.join(','));
       await setPreference('PREF_ADULT_CONTENT', 'false');
+      await setPreference('PREF_FILTER_BY_COUNTRY', 'false');
+      await setPreference('PREF_USER_COUNTRY', 'US');
+      await setPreference('PREF_OTT_PROVIDERS', '');
+      await setPreference('PREF_GEMINI_API_KEY', '');
 
       showCustomAlert('Reset Complete', 'Your application has been reset.');
       setShowSettings(false);
@@ -638,14 +778,44 @@ export default function ProfileScreen() {
                 style={[styles.settingInput, { backgroundColor: colors.bg, color: colors.text, borderColor: colors.border }]}
                 value={apiKey}
                 onChangeText={setApiKey}
-                placeholder="Enter your TMDB API key or token..."
+                placeholder="API Key (v3 auth)"
                 placeholderTextColor={colors.muted}
                 secureTextEntry
                 autoCapitalize="none"
               />
-              <TouchableOpacity style={[styles.saveBtn, { backgroundColor: colors.accent }]} onPress={handleSaveApiKey}>
-                <Text style={[styles.saveBtnText, { color: colors.bg }]}>Save</Text>
-              </TouchableOpacity>
+              {apiKey !== savedApiKey && (
+                <TouchableOpacity
+                  style={[styles.saveBtn, { backgroundColor: colors.accent, marginTop: 8 }]}
+                  onPress={handleSaveApiKey}
+                >
+                  <Text style={[styles.saveBtnText, { color: colors.bg }]}>Save Key</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Gemini API Key */}
+            <View style={[styles.settingRow, { marginTop: 16 }]}>
+              <Text style={[styles.settingLabel, { color: colors.secondary }]}>Gemini API Key (Optional)</Text>
+              <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2, marginBottom: 8 }}>
+                Enables AI-powered recommendations based on your detailed ratings (get a free key at aistudio.google.com)
+              </Text>
+              <TextInput
+                style={[styles.settingInput, { backgroundColor: colors.bg, color: colors.text, borderColor: colors.border }]}
+                value={geminiApiKey}
+                onChangeText={setGeminiApiKey}
+                placeholder="Gemini API Key"
+                placeholderTextColor={colors.muted}
+                secureTextEntry
+                autoCapitalize="none"
+              />
+              {geminiApiKey !== savedGeminiApiKey && (
+                <TouchableOpacity
+                  style={[styles.saveBtn, { backgroundColor: colors.accent, marginTop: 8 }]}
+                  onPress={handleSaveGeminiApiKey}
+                >
+                  <Text style={[styles.saveBtnText, { color: colors.bg }]}>Save Gemini Key</Text>
+                </TouchableOpacity>
+              )}
             </View>
 
             <View style={[styles.settingRow, { marginTop: 16 }]}>
@@ -689,6 +859,114 @@ export default function ProfileScreen() {
                   color={includeAdult ? colors.accent : colors.muted}
                 />
               </TouchableOpacity>
+            </View>
+
+            {/* Filter Series by Country Toggle */}
+            <View style={[styles.settingRowHorizontal, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.settingLabel, { color: colors.secondary }]}>Filter Series by Country</Text>
+                <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2 }}>
+                  Only show series available on streaming/digital in your country
+                </Text>
+              </View>
+              <TouchableOpacity onPress={handleToggleFilterByCountry} style={styles.toggleBtn}>
+                <Ionicons
+                  name={filterByCountry ? 'checkbox' : 'square-outline'}
+                  size={22}
+                  color={filterByCountry ? colors.accent : colors.muted}
+                />
+              </TouchableOpacity>
+            </View>
+
+            {/* User Country Selector — Dropdown */}
+            {filterByCountry && (
+              <View style={[styles.settingRowVertical, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
+                <Text style={[styles.settingLabel, { color: colors.secondary }]}>Your Country</Text>
+                <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2, marginBottom: 8 }}>
+                  Select region for watch provider availability
+                </Text>
+                <TouchableOpacity
+                  style={[
+                    styles.dropdownBtn,
+                    { backgroundColor: colors.bg, borderColor: colors.border },
+                  ]}
+                  onPress={() => setCountryDropdownOpen(true)}
+                >
+                  <Text style={[styles.dropdownBtnText, { color: colors.text }]}>
+                    {(() => { const c = COUNTRIES.find(c => c.code === userCountry); return c ? `${c.flag}  ${c.name}` : userCountry; })()}
+                  </Text>
+                  <Ionicons name="chevron-down" size={18} color={colors.muted} />
+                </TouchableOpacity>
+
+                {/* Country Dropdown Modal */}
+                <Modal visible={countryDropdownOpen} transparent animationType="fade" onRequestClose={() => setCountryDropdownOpen(false)}>
+                  <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }} onPress={() => setCountryDropdownOpen(false)}>
+                    <View style={[styles.dropdownModal, { backgroundColor: colors.card }]}>
+                      <Text style={[styles.dropdownTitle, { color: colors.text }]}>Select Country</Text>
+                      <ScrollView style={{ maxHeight: 360 }} showsVerticalScrollIndicator={false}>
+                        {COUNTRIES.map((country) => {
+                          const isSelected = userCountry === country.code;
+                          return (
+                            <TouchableOpacity
+                              key={country.code}
+                              style={[
+                                styles.dropdownItem,
+                                { borderBottomColor: colors.border },
+                                isSelected && { backgroundColor: colors.accentMuted },
+                              ]}
+                              onPress={() => {
+                                handleSelectCountry(country.code);
+                                setCountryDropdownOpen(false);
+                              }}
+                            >
+                              <Text style={{ fontSize: 18, marginRight: 10 }}>{country.flag}</Text>
+                              <Text style={[styles.dropdownItemText, { color: colors.text }, isSelected && { color: colors.accent, fontWeight: '700' }]}>
+                                {country.name}
+                              </Text>
+                              {isSelected && <Ionicons name="checkmark" size={18} color={colors.accent} style={{ marginLeft: 'auto' }} />}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </ScrollView>
+                    </View>
+                  </Pressable>
+                </Modal>
+              </View>
+            )}
+
+            {/* Streaming Platforms Selector */}
+            <View style={[styles.settingRowVertical, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
+              <Text style={[styles.settingLabel, { color: colors.secondary }]}>Streaming Platforms</Text>
+              <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2, marginBottom: 8 }}>
+                Select your subscribed platforms to get OTT release alerts
+              </Text>
+              <View style={styles.langChipsContainer}>
+                {OTT_PROVIDERS.map((provider) => {
+                  const isSelected = selectedOttProviders.includes(provider.id);
+                  return (
+                    <TouchableOpacity
+                      key={provider.id}
+                      onPress={() => handleToggleOttProvider(provider.id)}
+                      style={[
+                        styles.langChip,
+                        {
+                          backgroundColor: isSelected ? colors.accentMuted : colors.bg,
+                          borderColor: isSelected ? colors.accent : colors.border,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.langChipText,
+                          { color: isSelected ? colors.accent : colors.secondary },
+                        ]}
+                      >
+                        {provider.name}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
             </View>
 
             {/* Preferred Languages Selector */}
@@ -849,7 +1127,6 @@ export default function ProfileScreen() {
             {[
               { key: 'watchlist' as LibraryTab, label: 'Watchlist', icon: 'bookmark-outline' as const },
               { key: 'watched' as LibraryTab, label: 'Watched', icon: 'checkmark-circle-outline' as const },
-              { key: 'interested' as LibraryTab, label: 'Interested', icon: 'heart-outline' as const },
             ].map(({ key, label, icon }) => (
               <TouchableOpacity
                 key={key}
@@ -924,6 +1201,7 @@ export default function ProfileScreen() {
 
           {/* Items List */}
           <FlatList
+            style={{ flex: 1 }}
             key={`${filterMediaType}-${activeTab}`}
             data={items}
             renderItem={renderLibraryItem}
@@ -941,9 +1219,7 @@ export default function ProfileScreen() {
                   name={
                     activeTab === 'watchlist'
                       ? 'bookmark-outline'
-                      : activeTab === 'watched'
-                      ? 'checkmark-circle-outline'
-                      : 'heart-outline'
+                      : 'checkmark-circle-outline'
                   }
                   size={48}
                   color={colors.muted}
@@ -951,16 +1227,12 @@ export default function ProfileScreen() {
                 <Text style={[styles.emptyTitle, { color: colors.text }]}>
                   {activeTab === 'watchlist'
                     ? 'Your watchlist is empty'
-                    : activeTab === 'watched'
-                    ? 'No movies logged yet'
-                    : 'No interested items'}
+                    : 'No movies logged yet'}
                 </Text>
                 <Text style={[styles.emptySubtitle, { color: colors.secondary }]}>
                   {activeTab === 'watchlist'
                     ? 'Browse movies and add them to your watchlist'
-                    : activeTab === 'watched'
-                    ? 'Start logging movies you watch'
-                    : 'Mark upcoming movies as interested to track them'}
+                    : 'Start logging movies you watch'}
                 </Text>
               </View>
             }
@@ -1464,5 +1736,42 @@ const styles = StyleSheet.create({
   modalBtnText: {
     fontSize: 13,
     fontWeight: '600',
+  },
+  dropdownBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  dropdownBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  dropdownModal: {
+    width: '80%',
+    maxWidth: 340,
+    borderRadius: 16,
+    padding: 16,
+    maxHeight: 440,
+  },
+  dropdownTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderBottomWidth: 0.5,
+    borderRadius: 8,
+  },
+  dropdownItemText: {
+    fontSize: 15,
+    fontWeight: '500',
   },
 });

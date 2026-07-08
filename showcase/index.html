@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Matinee — Premium Cinema Tracker & AI Recommendation Engine</title>
+    <meta name="description" content="Discover Matinee, a premium offline cinema tracker with intelligent local AI recommendation engine powered by Gemini, failover routing, and rich viewing statistics.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="icon" type="image/png" href="assets/screenshots/matinee_app_icon_1781721589405.png">
+</head>
+<body>
+
+    <!-- Password Protection Modal -->
+    <div id="password-overlay" class="password-overlay">
+        <div class="password-card">
+            <div class="password-logo">
+                <img src="assets/screenshots/matinee_app_icon_1781721589405.png" alt="Matinee Logo">
+                <h2>Matinee</h2>
+            </div>
+            <p>This preview is password protected. Please enter the password to explore.</p>
+            <form id="password-form">
+                <input type="password" id="password-input" placeholder="Enter password" required autocomplete="current-password">
+                <button type="submit" class="btn btn-primary btn-full">Unlock Preview</button>
+                <p id="password-error" class="password-error"></p>
+            </form>
+        </div>
+    </div>
+
+    <!-- Sticky Nav -->
+    <header class="glass-header">
+        <div class="nav-container">
+            <a href="#" class="logo">
+                <img src="assets/screenshots/matinee_app_icon_1781721589405.png" alt="Matinee Logo" class="logo-img">
+                <span class="logo-text">Matinee</span>
+            </a>
+            <nav class="nav-links">
+                <a href="#features">Features</a>
+                <a href="#simulator">AI Taste Match</a>
+                <a href="#screenshots">Screenshots</a>
+                <a href="#setup">Setup Guide</a>
+            </nav>
+            <div class="nav-cta" style="display: flex; gap: 8px; align-items: center;">
+                <a href="./demo.html" class="btn btn-secondary btn-sm" id="nav-demo-btn">Try Web Demo</a>
+                <a href="../build-latest.apk" class="btn btn-primary btn-sm" id="nav-download-btn">Download APK</a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Glowing Background blobs -->
+    <div class="glow-bg">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <!-- Hero Section -->
+    <section class="hero-section">
+        <div class="hero-container">
+            <div class="hero-content">
+                <div class="badge">
+                    <span class="badge-dot"></span>
+                    v1.0.0 Stable Build
+                </div>
+                <h1 class="hero-title">Your Cinema.<br><span class="accent-text">Curated by AI.</span></h1>
+                <p class="hero-description">
+                    Matinee is a premium, offline-first cinema tracking and personalized recommendation app. Rate films, generate insights, bypass ISP blocks, and discover titles tailored strictly to your tastes.
+                </p>
+                <div class="hero-meta">
+                    <span class="meta-item">Android 8.0+</span>
+                    <span class="meta-item">40.2 MB APK</span>
+                    <span class="meta-item">100% Local Data</span>
+                </div>
+                <div class="hero-actions" style="display: flex; gap: 16px; flex-wrap: wrap;">
+                    <a href="../build-latest.apk" class="btn btn-primary btn-lg" id="hero-download-btn">
+                        <svg class="download-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Download Latest APK
+                    </a>
+                    <a href="./demo.html" class="btn btn-secondary btn-lg" id="hero-demo-btn">
+                        Try Web Demo
+                    </a>
+                    <a href="#setup" class="btn btn-secondary btn-lg">Setup Instructions</a>
+                </div>
+            </div>
+            
+            <div class="hero-visual">
+                <div class="phone-frame-container">
+                    <div class="phone-frame">
+                        <div class="phone-notch"></div>
+                        <div class="phone-screen">
+                            <img src="assets/screenshots/matinee_splash_1781721602953.png" alt="Matinee Splash Screen" class="phone-app-img active" id="phone-preview-img">
+                        </div>
+                        <div class="phone-home-indicator"></div>
+                    </div>
+                    <div class="phone-reflection"></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="section features-section">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Designed for True Cinephiles</h2>
+                <p class="section-subtitle">No accounts, no tracking, and no internet censorship. Just pure, personalized cinema curation.</p>
+            </div>
+            
+            <div class="features-grid">
+                <!-- Card 1: AI Engine -->
+                <div class="feature-card large-card reveal">
+                    <div class="card-glow"></div>
+                    <div class="card-icon-svg">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1 0-3.12 3 3 0 0 1 0-3.88 2.5 2.5 0 0 1 0-3.12A2.5 2.5 0 0 1 9.5 2z"></path>
+                            <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 0-3.12 3 3 0 0 0 0-3.88 2.5 2.5 0 0 0 0-3.12A2.5 2.5 0 0 0 14.5 2z"></path>
+                        </svg>
+                    </div>
+                    <h3>Advanced Recommendation Engine</h3>
+                    <p>Powered by local heuristic metrics and client-side Gemini 2.0. Evaluates rating weights, blacklists disliked actors/directors, and crawls filmographies of your favorites to generate highly personalized recommendations (70%+ accuracy).</p>
+                    <div class="card-tags">
+                        <span>Gemini 2.0 Flash</span>
+                        <span>Filmography Ingestion</span>
+                        <span>Franchise Cap</span>
+                    </div>
+                </div>
+
+                <!-- Card 2: Privacy -->
+                <div class="feature-card reveal">
+                    <div class="card-glow"></div>
+                    <div class="card-icon-svg">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                        </svg>
+                    </div>
+                    <h3>100% Offline & Private</h3>
+                    <p>All watchlists, ratings, history, and preferences are stored locally in an encrypted SQLite database. No external database uploads, no data brokerage, and absolute secrets security.</p>
+                    <div class="card-tags">
+                        <span>Local SQLite</span>
+                        <span>Zero Telemetry</span>
+                    </div>
+                </div>
+
+                <!-- Card 3: ISP Failover -->
+                <div class="feature-card reveal">
+                    <div class="card-glow"></div>
+                    <div class="card-icon-svg">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="2" y1="12" x2="22" y2="12"></line>
+                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                        </svg>
+                    </div>
+                    <h3>Bypass ISP & DNS Censorship</h3>
+                    <p>Built-in failover routing rotates through multiple TMDB API gateways. Image loading is proxied via Weserv to secure poster and backdrop fetches against provider blocklists (like Jio or Adguard).</p>
+                    <div class="card-tags">
+                        <span>weserv.nl Proxy</span>
+                        <span>API Gateways</span>
+                    </div>
+                </div>
+
+                <!-- Card 4: Stats -->
+                <div class="feature-card reveal">
+                    <div class="card-glow"></div>
+                    <div class="card-icon-svg">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                            <line x1="9" y1="3" x2="9" y2="21"></line>
+                            <line x1="15" y1="3" x2="15" y2="21"></line>
+                            <line x1="3" y1="9" x2="21" y2="9"></line>
+                            <line x1="3" y1="15" x2="21" y2="15"></line>
+                        </svg>
+                    </div>
+                    <h3>Rich Contribution Heatmap</h3>
+                    <p>Keep track of your viewing patterns with a GitHub-style activity grid, genre breakdown, average rating trends, total watch time, and current watch streaks.</p>
+                    <div class="card-tags">
+                        <span>Interactive Charts</span>
+                        <span>Streak Trackers</span>
+                    </div>
+                </div>
+
+                <!-- Card 5: Language -->
+                <div class="feature-card reveal">
+                    <div class="card-glow"></div>
+                    <div class="card-icon-svg">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                    </div>
+                    <h3>Language Multiplexer</h3>
+                    <p>Proportionally mixes releases across multi-language sets. Enforces a 15% minimum representation floor for selected regional languages so global hits never drown out regional masterpieces.</p>
+                    <div class="card-tags">
+                        <span>Language Floor</span>
+                        <span>Regional Customization</span>
+                    </div>
+                </div>
+
+                <!-- Card 6: Alerts & Sync -->
+                <div class="feature-card reveal">
+                    <div class="card-glow"></div>
+                    <div class="card-icon-svg">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+                        </svg>
+                    </div>
+                    <h3>Calendar & Alerts</h3>
+                    <p>Get push notifications 24 hours before and on release day for upcoming watchlist titles. Add them directly to your Google Calendar in a single tap.</p>
+                    <div class="card-tags">
+                        <span>Expo Notifications</span>
+                        <span>Google Calendar API</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Taste Match Simulator Section -->
+    <section id="simulator" class="section simulator-section">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Try the Taste Matcher</h2>
+                <p class="section-subtitle">Experience how Matinee combines custom metrics and Gemini AI to suggest the perfect watch.</p>
+            </div>
+
+            <div class="simulator-wrapper">
+                <!-- Controls -->
+                <div class="sim-controls glass-card">
+                    <div class="sim-group">
+                        <label>Vibe & Pacing</label>
+                        <div class="sim-chips" id="sim-vibe">
+                            <button class="chip active" data-value="mind-bending">Mind-bending</button>
+                            <button class="chip" data-value="action">Action Packed</button>
+                            <button class="chip" data-value="emotional">Emotional</button>
+                            <button class="chip" data-value="cozy">Cozy & Light</button>
+                            <button class="chip" data-value="dark">Dark & Gritty</button>
+                        </div>
+                    </div>
+
+                    <div class="sim-group">
+                        <label>Preferred Era</label>
+                        <div class="sim-chips" id="sim-era">
+                            <button class="chip" data-value="golden">Golden Age (&lt;1970)</button>
+                            <button class="chip" data-value="millennium">Millennium (1990-2010)</button>
+                            <button class="chip active" data-value="modern">Modern (2010-2023)</button>
+                            <button class="chip" data-value="brand-new">Brand New (2024+)</button>
+                        </div>
+                    </div>
+
+                    <div class="sim-group">
+                        <label>Duration Limit</label>
+                        <div class="sim-chips" id="sim-duration">
+                            <button class="chip" data-value="short">Short & Sweet (&lt;90m)</button>
+                            <button class="chip active" data-value="standard">Standard (90-130m)</button>
+                            <button class="chip" data-value="epic">Epic Journey (&gt;130m)</button>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary btn-full" id="sim-generate-btn">Generate Taste Match</button>
+                </div>
+
+                <!-- Preview Output -->
+                <div class="sim-output">
+                    <div class="recommendation-card" id="recommendation-card">
+                        <div class="rec-header">
+                            <div class="rec-match-score">
+                                <span class="score-num" id="rec-score">96%</span>
+                                <span class="score-label">Taste Match</span>
+                            </div>
+                            <span class="media-type-badge" id="rec-media-type">MOVIE</span>
+                        </div>
+                        
+                        <div class="rec-body">
+                            <h4 id="rec-title">Inception</h4>
+                            <div class="rec-meta">
+                                <span id="rec-year">2010</span> &bull; 
+                                <span id="rec-genres">Sci-Fi, Action, Thriller</span> &bull; 
+                                <span id="rec-runtime">148 mins</span>
+                            </div>
+                            
+                            <div class="rec-credits">
+                                <strong>Director:</strong> <span id="rec-director">Christopher Nolan</span>
+                            </div>
+
+                            <div class="rec-ai-box">
+                                <div class="ai-box-header">
+                                    <div class="ai-stars-svg">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                                        </svg>
+                                    </div>
+                                    <strong>Gemini AI Taste Match Insight</strong>
+                                </div>
+                                <p id="rec-insight">
+                                    "Since you loved Interstellar and rate mind-bending concepts highly, this Christopher Nolan classic offers the perfect mix of high-concept dream architecture, ticking-clock thrills, and deep emotional resonance."
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Screenshot Gallery Section -->
+    <section id="screenshots" class="section screenshots-section">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Interface Showcase</h2>
+                <p class="section-subtitle">A native, modern interface carefully customized to feel like a high-end cinema lounge.</p>
+            </div>
+
+            <!-- Screenshots Grid -->
+            <div class="screenshots-grid" id="screenshots-grid">
+                <!-- Screenshots loaded here dynamically with clean ratios -->
+            </div>
+        </div>
+    </section>
+
+    <!-- Lightbox Modal -->
+    <div class="lightbox" id="lightbox">
+        <span class="lightbox-close" id="lightbox-close">&times;</span>
+        <img class="lightbox-content" id="lightbox-img" alt="Fullscreen App View">
+        <div class="lightbox-caption" id="lightbox-caption"></div>
+    </div>
+
+    <!-- Setup Guide Section -->
+    <section id="setup" class="section setup-section">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Get Started in 3 Steps</h2>
+                <p class="section-subtitle">Matinee operates with full local independence. Here is how to configure it in minutes.</p>
+            </div>
+
+            <div class="setup-timeline">
+                <div class="setup-step reveal">
+                    <div class="step-num">1</div>
+                    <div class="step-content glass-card">
+                        <h3>Download & Install the APK</h3>
+                        <p>Click the download button to save <strong>build-latest.apk</strong> directly to your Android device.</p>
+                        <p class="step-tip">
+                            Note: Since it is an offline APK distributed directly, you might need to enable "Allow installation from Unknown Sources" in your browser or file manager settings.
+                        </p>
+                        <div style="margin-top: 15px;">
+                            <a href="../build-latest.apk" class="btn btn-secondary btn-sm">Download APK</a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="setup-step reveal">
+                    <div class="step-num">2</div>
+                    <div class="step-content glass-card">
+                        <h3>Configure Your API Keys</h3>
+                        <p>Matinee operates client-side with complete privacy. To query movie metadata and generate personalized AI insights, you will need to add two keys in the app's settings panel:</p>
+                        
+                        <h4 class="step-subheading">A. Google Gemini API Key (For AI Taste Insights)</h4>
+                        <ol class="setup-list">
+                            <li>Visit <a href="https://ai.google.dev/aistudio" target="_blank" class="text-link">Google AI Studio</a>.</li>
+                            <li>Sign in with your Google account.</li>
+                            <li>Click <strong>Create API Key</strong> and copy your key.</li>
+                        </ol>
+
+                        <h4 class="step-subheading" style="margin-top: 15px;">B. TMDb API Read Access Token (For Media Metadata)</h4>
+                        <ol class="setup-list">
+                            <li>Sign up or log in to <a href="https://www.themoviedb.org" target="_blank" class="text-link">The Movie Database (TMDb)</a>.</li>
+                            <li>Go to your Account Settings &rarr; **API** tab.</li>
+                            <li>Request an API key (registering as a Developer for personal use).</li>
+                            <li>Copy the **API Read Access Token** (the long JWT key).</li>
+                        </ol>
+
+                        <p class="step-tip">
+                            Both keys are stored securely on your device's local encrypted sandbox (Expo SecureStore) and never pass through any middleman or external servers.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="setup-step reveal">
+                    <div class="step-num">3</div>
+                    <div class="step-content glass-card">
+                        <h3>Activate & Enjoy</h3>
+                        <p>Open Matinee, navigate to the <strong>Profile & Settings</strong> tab, and paste both keys in their respective fields. The app will immediately initialize your local candidate recommendations seeds based on your database rating history.</p>
+                        <p>No monthly fees, zero ads, and total ownership of your cinematic logs.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="footer-container">
+            <div class="footer-brand">
+                <div class="logo">
+                    <img src="assets/screenshots/matinee_app_icon_1781721589405.png" alt="Matinee" class="logo-img">
+                    <span class="logo-text">Matinee</span>
+                </div>
+                <p>Private, local-first cinema logger and recommendation engine.</p>
+            </div>
+            
+            <div class="footer-links">
+                <div class="footer-col">
+                    <h4>Application</h4>
+                    <a href="../build-latest.apk">Download APK</a>
+                    <a href="https://github.com/srinidhibhat45/Matinee" target="_blank">GitHub Repository</a>
+                </div>
+                <div class="footer-col">
+                    <h4>Privacy Pledge</h4>
+                    <span class="privacy-badge">✓ Offline Database</span>
+                    <span class="privacy-badge">✓ Local API Keys</span>
+                    <span class="privacy-badge">✓ Zero Analytics</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="footer-bottom">
+            <p>&copy; 2026 Matinee. All rights reserved. Powered by Gemini 2.0 Flash.</p>
+            <p class="mit-text">Distributed under the MIT License.</p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>

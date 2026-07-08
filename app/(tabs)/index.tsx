@@ -37,6 +37,8 @@ import { TMDBMediaItem, RecommendedItem, MediaType } from '../../types';
 import { MOVIE_GENRES, TV_GENRES, getGenreName } from '../../constants/genres';
 import { useTheme } from '../../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { inAppNotificationService } from '../../services/inAppNotifications';
+import NotificationPanel from '../../components/NotificationPanel';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - 44) / 3;
@@ -70,6 +72,8 @@ export default function DiscoverScreen() {
   // Recommendations Modal & Languages
   const [showAllRecommendations, setShowAllRecommendations] = useState(false);
   const [preferredLanguages, setPreferredLanguages] = useState<string[]>([]);
+  const [notificationPanelVisible, setNotificationPanelVisible] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   const currentGenres = activeTab === 'series'
     ? TV_GENRES
@@ -241,18 +245,39 @@ export default function DiscoverScreen() {
     }
   }, [activeTab]);
 
+  const fetchUnreadCount = useCallback(async () => {
+    try {
+      const count = await inAppNotificationService.getUnreadCount();
+      setUnreadCount(count);
+    } catch (err) {
+      console.warn('Error fetching unread count:', err);
+    }
+  }, []);
+
+  const triggerNotificationSync = useCallback(async () => {
+    try {
+      await fetchUnreadCount();
+      await inAppNotificationService.generateNotifications();
+      await fetchUnreadCount();
+    } catch (err) {
+      console.warn('Error syncing notifications:', err);
+    }
+  }, [fetchUnreadCount]);
+
   useFocusEffect(
     useCallback(() => {
+      fetchUnreadCount();
       const { dbChangeTimestamp } = require('../../services/database');
       if (dbChangeTimestamp > lastFetchedRef.current) {
         fetchHomeData(true);
       }
-    }, [fetchHomeData])
+    }, [fetchHomeData, fetchUnreadCount])
   );
 
   useEffect(() => {
     fetchHomeData();
-  }, [activeTab, fetchHomeData]);
+    triggerNotificationSync();
+  }, [activeTab, fetchHomeData, triggerNotificationSync]);
 
   const [longPressItem, setLongPressItem] = useState<any | null>(null);
   const [longPressStatus, setLongPressStatus] = useState<string | null>(null);
@@ -287,11 +312,10 @@ export default function DiscoverScreen() {
       const existing = await getItem(tmdbId);
 
       if (action === 'watchlist') {
-        if (existing?.status === 'watchlist' || existing?.status === 'interested') {
+        if (existing?.status === 'watchlist') {
           await deleteItem(existing.id);
         } else {
-          const isUnreleased = longPressItem.releaseDate ? new Date(longPressItem.releaseDate) > new Date() : false;
-          const status = isUnreleased ? 'interested' : 'watchlist';
+          const status = 'watchlist';
           await addItem({
             tmdbId,
             mediaType,
@@ -660,7 +684,7 @@ export default function DiscoverScreen() {
           {item.releaseDate ? item.releaseDate.split('-')[0] : '—'}
         </Text>
         {item.reason ? (
-          <Text style={[styles.gridReason, { color: colors.accent }]} numberOfLines={1}>
+          <Text style={[styles.gridReason, { color: colors.accent }]} numberOfLines={2}>
             ✨ {item.reason}
           </Text>
         ) : null}
@@ -669,46 +693,67 @@ export default function DiscoverScreen() {
     [handleItemPress, colors]
   );
  
-  if (showAllRecommendations) {
-    return (
-      <View style={[styles.container, { backgroundColor: colors.bg, paddingTop: Math.max(16, insets.top) + 12 }]}>
-        {/* Header */}
-        <View style={[styles.header, { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 16 }]}>
-          <TouchableOpacity onPress={() => setShowAllRecommendations(false)} hitSlop={12}>
-            <Ionicons name="arrow-back" size={24} color={colors.text} />
-          </TouchableOpacity>
-          <Text style={[styles.headerTitle, { color: colors.text, fontSize: 22 }]}>All Recommendations</Text>
-        </View>
-
-        {/* Grid List */}
-        <FlatList
-          key="recs-grid"
-          data={recommendations}
-          renderItem={renderGridItem}
-          keyExtractor={(item) => `rec-grid-${item.id}`}
-          numColumns={3}
-          columnWrapperStyle={styles.gridRow}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ paddingBottom: 100 }}
-          ListEmptyComponent={
-            <View style={styles.emptySearch}>
-              <Text style={[styles.emptyText, { color: colors.muted }]}>No recommendations available</Text>
-            </View>
-          }
-        />
-      </View>
-    );
-  }
-
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
-      {/* Header */}
-      <View style={[styles.header, { paddingTop: Math.max(16, insets.top) + 12 }]}>
-        <View style={styles.logoRow}>
-          <Logo size={28} />
-          <Text style={[styles.headerTitle, { color: colors.text }]}>Matinee</Text>
+      {showAllRecommendations ? (
+        <View style={{ flex: 1, paddingTop: Math.max(16, insets.top) + 12 }}>
+          {/* Header */}
+          <View style={[styles.header, { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 16 }]}>
+            <TouchableOpacity onPress={() => setShowAllRecommendations(false)} hitSlop={12}>
+              <Ionicons name="arrow-back" size={24} color={colors.text} />
+            </TouchableOpacity>
+            <Text style={[styles.headerTitle, { color: colors.text, fontSize: 22 }]}>All Recommendations</Text>
+          </View>
+
+          {/* Grid List */}
+          <FlatList
+            style={{ flex: 1 }}
+            key="recs-grid"
+            data={recommendations}
+            renderItem={renderGridItem}
+            keyExtractor={(item) => `rec-grid-${item.id}`}
+            numColumns={3}
+            columnWrapperStyle={styles.gridRow}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ paddingBottom: 100 }}
+            ListEmptyComponent={
+              <View style={styles.emptySearch}>
+                <Text style={[styles.emptyText, { color: colors.muted }]}>No recommendations available</Text>
+              </View>
+            }
+          />
         </View>
-      </View>
+      ) : (
+        <>
+          {/* Header */}
+          <View style={[
+            styles.header,
+            {
+              paddingTop: Math.max(16, insets.top) + 12,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }
+          ]}>
+            <View style={styles.logoRow}>
+              <Logo size={28} />
+              <Text style={[styles.headerTitle, { color: colors.text }]}>Matinee</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.bellBtn}
+              onPress={() => setNotificationPanelVisible(true)}
+              hitSlop={8}
+            >
+              <Ionicons name="notifications-outline" size={24} color={colors.text} />
+              {unreadCount > 0 && (
+                <View style={[styles.badge, { backgroundColor: colors.accent }]}>
+                  <Text style={styles.badgeText}>
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          </View>
 
       {/* Search Bar & Optional Back Button */}
       <View style={styles.searchContainer}>
@@ -801,6 +846,7 @@ export default function DiscoverScreen() {
             />
           ) : getProcessedSearchResults().length > 0 ? (
             <FlatList
+              style={{ flex: 1 }}
               data={getProcessedSearchResults()}
               renderItem={renderSearchResult}
               keyExtractor={(item) => `${item.mediaType || 'movie'}-${item.id}`}
@@ -830,6 +876,7 @@ export default function DiscoverScreen() {
       ) : selectedGenres.length > 0 ? (
         /* Genre Discover Grid Mode */
         <FlatList
+          style={{ flex: 1 }}
           key="discover-grid"
           ListHeaderComponent={
             <>
@@ -931,12 +978,13 @@ export default function DiscoverScreen() {
       ) : (
         /* Home Feed Mode (selectedGenres.length === 0) */
         <ScrollView
+          style={{ flex: 1 }}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
               onRefresh={async () => {
                 setRefreshing(true);
-                await fetchHomeData();
+                await Promise.all([fetchHomeData(), triggerNotificationSync()]);
                 setRefreshing(false);
               }}
               tintColor={colors.accent}
@@ -1079,6 +1127,8 @@ export default function DiscoverScreen() {
           )}
         </ScrollView>
       )}
+        </>
+      )}
 
       {/* Long Press Quick Actions Bottom Sheet */}
       {longPressItem && (
@@ -1129,7 +1179,7 @@ export default function DiscoverScreen() {
                 >
                   <Ionicons
                     name={
-                      longPressStatus === 'watchlist' || longPressStatus === 'interested'
+                      longPressStatus === 'watchlist'
                         ? 'bookmark'
                         : 'bookmark-outline'
                     }
@@ -1138,7 +1188,7 @@ export default function DiscoverScreen() {
                     style={{ marginRight: 12 }}
                   />
                   <Text style={[styles.bottomSheetOptionText, { color: colors.text }]}>
-                    {longPressStatus === 'watchlist' || longPressStatus === 'interested'
+                    {longPressStatus === 'watchlist'
                       ? 'Remove from Watchlist'
                       : 'Add to Watchlist'}
                   </Text>
@@ -1336,8 +1386,11 @@ export default function DiscoverScreen() {
         </Pressable>
       </Modal>
 
-
-
+      <NotificationPanel
+        visible={notificationPanelVisible}
+        onClose={() => setNotificationPanelVisible(false)}
+        onRefreshCount={fetchUnreadCount}
+      />
     </View>
   );
 }
@@ -1670,5 +1723,29 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: '500',
     marginTop: 2,
+  },
+  bellBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  badge: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  badgeText: {
+    color: '#FFF',
+    fontSize: 8,
+    fontWeight: '900',
   },
 });

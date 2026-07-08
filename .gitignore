@@ -39,3 +39,9 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Netlify and npm caches
+.netlify/
+.npm-cache/
+*.apk
+

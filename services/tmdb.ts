@@ -6,6 +6,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MOVIE_GENRES, TV_GENRES } from '../constants/genres';
+import { getPreference, getCache as getSqliteCache, setCache as setSqliteCache, clearTmdbCache } from './database';
 
 import type {
   MediaType,
@@ -130,16 +131,25 @@ function normalizeMediaResult(item: any): TMDBMediaItem | null {
 
 async function getCached<T>(key: string): Promise<T | null> {
   try {
-    const raw = await AsyncStorage.getItem(`${CACHE_PREFIX}${key}`);
-    if (!raw) return null;
+    // 1. Try SQLite cache first
+    const cached = await getSqliteCache<T>(key);
+    if (cached) return cached;
 
-    const entry: { data: T; expiresAt: number } = JSON.parse(raw);
-    if (Date.now() > entry.expiresAt) {
-      // Expired — remove and treat as cache miss
-      await AsyncStorage.removeItem(`${CACHE_PREFIX}${key}`);
-      return null;
+    // 2. Fallback to AsyncStorage for backward compatibility
+    const raw = await AsyncStorage.getItem(`${CACHE_PREFIX}${key}`);
+    if (raw) {
+      const entry: { data: T; expiresAt: number } = JSON.parse(raw);
+      if (Date.now() <= entry.expiresAt) {
+        // Migration: write it into SQLite so future queries are fast
+        const ttl = entry.expiresAt - Date.now();
+        const ttlMinutes = Math.max(1, Math.round(ttl / 60000));
+        await setSqliteCache(key, entry.data, ttlMinutes);
+        return entry.data;
+      } else {
+        await AsyncStorage.removeItem(`${CACHE_PREFIX}${key}`);
+      }
     }
-    return entry.data;
+    return null;
   } catch {
     return null;
   }
@@ -147,8 +157,8 @@ async function getCached<T>(key: string): Promise<T | null> {
 
 async function setCache<T>(key: string, data: T, ttl: number): Promise<void> {
   try {
-    const entry = JSON.stringify({ data, expiresAt: Date.now() + ttl });
-    await AsyncStorage.setItem(`${CACHE_PREFIX}${key}`, entry);
+    const ttlMinutes = Math.max(1, Math.round(ttl / 60000));
+    await setSqliteCache(key, data, ttlMinutes);
   } catch {
     // Non-critical — silently ignore cache write failures
   }
@@ -156,6 +166,7 @@ async function setCache<T>(key: string, data: T, ttl: number): Promise<void> {
 
 async function clearAllCache(): Promise<void> {
   try {
+    await clearTmdbCache();
     const keys = await AsyncStorage.getAllKeys();
     const cacheKeys = keys.filter((k) => k.startsWith(CACHE_PREFIX));
     if (cacheKeys.length > 0) {
@@ -164,6 +175,34 @@ async function clearAllCache(): Promise<void> {
   } catch {
     console.warn('[TMDB] Failed to clear cache');
   }
+}
+
+/**
+ * Run a mapping function over an array of items with a concurrency limit.
+ */
+export async function limitConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: Promise<R>[] = [];
+  const executing = new Set<Promise<void>>();
+
+  for (const item of items) {
+    const p = Promise.resolve().then(() => fn(item));
+    results.push(p);
+
+    const e: Promise<void> = p.then(() => {
+      executing.delete(e);
+    });
+    executing.add(e);
+
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
+  }
+
+  return Promise.all(results);
 }
 
 // ─── Core Fetch ─────────────────────────────────────────────
@@ -280,8 +319,13 @@ async function tmdbFetch<T>(
           return null;
         }
         if (response.status === 404) {
-          console.warn(`[TMDB] 404 Not Found — ${path}`);
-          return null;
+          console.warn(`[TMDB] 404 Not Found on ${currentHost} — ${path}`);
+          const isOfficial = currentHost.includes('themoviedb.org') || currentHost.includes('api.tmdb.org');
+          if (isOfficial) {
+            return null;
+          }
+          console.warn(`[TMDB] Proxy returned 404. Trying fallback...`);
+          continue;
         }
         console.warn(`[TMDB] Host ${currentHost} returned HTTP ${response.status}. Trying fallback...`);
         continue;
@@ -637,11 +681,12 @@ export const tmdbService = {
       crew.find((c: any) => c.job === 'Director')?.name ??
       (raw.created_by?.[0]?.name ?? null);
 
-    // Watch providers — pull the US region by default, fall back to first available
+    // Watch providers — pull user's preferred country, fallback to US/IN/first available
     const providerData = raw['watch/providers']?.results;
     let watchProviders = null;
     if (providerData) {
-      watchProviders = providerData.US ?? providerData.IN ?? Object.values(providerData)[0] ?? null;
+      const userCountry = (await getPreference('PREF_USER_COUNTRY')) || 'US';
+      watchProviders = providerData[userCountry] ?? providerData.US ?? providerData.IN ?? Object.values(providerData)[0] ?? null;
     }
 
     // Normalize recommendations and similar
@@ -991,6 +1036,7 @@ export const tmdbService = {
     languages: string[],
     page = 1,
     forceRefresh = false,
+    showSeries = false,
   ): Promise<PaginatedResponse<TMDBMediaItem>> {
     const today = new Date().toISOString().slice(0, 10);
 
@@ -1006,25 +1052,79 @@ export const tmdbService = {
     // Fetch each language in parallel
     const fetches = languages.map(async (lang) => {
       try {
-        const [movieRes, tvRes] = await Promise.all([
-          this.discover('movie', {
-            withOriginalLanguage: lang,
-            releaseDateGte: today,
-            releaseDateLte: futureDate,
-            sortBy: 'primary_release_date.asc',
-          }, page, forceRefresh),
-          this.discover('tv', {
-            withOriginalLanguage: lang,
-            releaseDateGte: today,
-            releaseDateLte: futureDate,
-            sortBy: 'popularity.desc',
-          }, page, forceRefresh),
-        ]);
+        const moviePromise = this.discover('movie', {
+          withOriginalLanguage: lang,
+          releaseDateGte: today,
+          releaseDateLte: futureDate,
+          sortBy: 'primary_release_date.asc',
+        }, page, forceRefresh);
+
+        const tvPromise = showSeries
+          ? this.discover('tv', {
+              withOriginalLanguage: lang,
+              releaseDateGte: today,
+              releaseDateLte: futureDate,
+              sortBy: 'popularity.desc',
+            }, page, forceRefresh)
+          : Promise.resolve(null);
+
+        const [movieRes, tvRes] = await Promise.all([moviePromise, tvPromise]);
+
+        const tvResults = tvRes?.results || [];
+
+        // Decorate TV shows with their next air dates using limitConcurrency to avoid request storm
+        const decoratedTv = showSeries && tvResults.length > 0
+          ? await limitConcurrency(
+              tvResults,
+              5,
+              async (item) => {
+                try {
+                  const details = await this.getDetails(item.id, 'tv', forceRefresh);
+                  if (details) {
+                    let upcomingDate: string | null = null;
+
+                    // 1. Check nextEpisodeToAir
+                    if (details.nextEpisodeToAir && details.nextEpisodeToAir.air_date >= today) {
+                      upcomingDate = details.nextEpisodeToAir.air_date;
+                    }
+
+                    // 2. Otherwise, check seasons list
+                    if (!upcomingDate && details.seasons) {
+                      const futureSeasons = details.seasons
+                        .filter((s: any) => s.season_number > 0 && s.air_date && s.air_date >= today)
+                        .sort((a: any, b: any) => a.season_number - b.season_number);
+                      if (futureSeasons.length > 0) {
+                        upcomingDate = futureSeasons[0].air_date;
+                      }
+                    }
+
+                    // 3. Otherwise, if first air date is in the future
+                    if (!upcomingDate && item.releaseDate && item.releaseDate >= today) {
+                      upcomingDate = item.releaseDate;
+                    }
+
+                    if (upcomingDate) {
+                      return {
+                        ...item,
+                        releaseDate: upcomingDate,
+                      };
+                    }
+                  }
+                } catch (err) {
+                  console.warn(`[TMDB] getUpcomingByLanguages failed to decorate TV item ${item.id}:`, err);
+                }
+                return item;
+              }
+            )
+          : [];
+
+        // Keep TV shows only if their releaseDate (updated next air date) is in the future
+        const upcomingTv = decoratedTv.filter((item) => item.releaseDate && item.releaseDate >= today);
 
         return {
-          results: [...(movieRes?.results || []), ...(tvRes?.results || [])],
+          results: [...(movieRes?.results || []), ...upcomingTv],
           totalPages: Math.max(movieRes?.totalPages || 0, tvRes?.totalPages || 0),
-          totalResults: (movieRes?.totalResults || 0) + (tvRes?.totalResults || 0),
+          totalResults: (movieRes?.totalResults || 0) + upcomingTv.length,
         };
       } catch (err) {
         console.error('getUpcomingByLanguages error for lang:', lang, err);

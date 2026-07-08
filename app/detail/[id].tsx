@@ -22,6 +22,7 @@ import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
 import { tmdbService, getImageUrl } from '../../services/tmdb';
+import { recommendationService } from '../../services/recommendations';
 import {
   getItem,
   addItem,
@@ -32,6 +33,7 @@ import {
   getEpisodeRatings,
   deleteEpisodeRating,
   updateItem,
+  getPreference,
 } from '../../services/database';
 import { calendarService } from '../../services/calendar';
 import { notificationService } from '../../services/notifications';
@@ -170,6 +172,9 @@ export default function DetailScreen() {
   const tmdbId = Number(id);
 
   const [details, setDetails] = useState<any>(null);
+  const [geminiApiKey, setGeminiApiKey] = useState<string | null>(null);
+  const [aiInsight, setAiInsight] = useState<{ matchScore: number; reason: string } | null>(null);
+  const [aiInsightLoading, setAiInsightLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const isUnreleased = details?.releaseDate ? new Date(details.releaseDate) > new Date() : false;
   const [itemStatus, setItemStatus] = useState<string | null>(null);
@@ -325,6 +330,57 @@ export default function DetailScreen() {
     fetchDetails();
   }, [fetchDetails]);
 
+  // Load Gemini API Key on mount
+  useEffect(() => {
+    const loadApiKey = async () => {
+      try {
+        const key = await getPreference('PREF_GEMINI_API_KEY');
+        if (key) {
+          setGeminiApiKey(key);
+        }
+      } catch (err) {
+        console.error('Failed to load Gemini key:', err);
+      }
+    };
+    loadApiKey();
+  }, []);
+
+  // Fetch AI Taste Match Insight when details are loaded and API key is present
+  useEffect(() => {
+    if (!details || !geminiApiKey) return;
+
+    let isMounted = true;
+    const fetchTasteMatch = async () => {
+      setAiInsightLoading(true);
+      try {
+        const genreNames = (details.genres || []).map((g: any) => g.name).join(', ');
+        const insight = await recommendationService.getAiTasteMatchInsight(
+          geminiApiKey,
+          tmdbId,
+          mediaType,
+          details.title,
+          details.overview || '',
+          genreNames
+        );
+        if (isMounted && insight) {
+          setAiInsight(insight);
+        }
+      } catch (err) {
+        console.error('Taste match fetch error:', err);
+      } finally {
+        if (isMounted) {
+          setAiInsightLoading(false);
+        }
+      }
+    };
+
+    fetchTasteMatch();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [details, geminiApiKey, tmdbId, mediaType]);
+
   // Lazily load episodes when activeSeasonNumber changes
   useEffect(() => {
     if (mediaType !== 'tv' || activeSeasonNumber === null) return;
@@ -431,12 +487,13 @@ export default function DetailScreen() {
           setIsRatingMode(true);
         }
 
-        if (status === 'interested' && details.releaseDate) {
+        if (status === 'watchlist' && details.releaseDate && new Date(details.releaseDate) > new Date()) {
           await notificationService.scheduleReleaseReminder(
             details.title,
             details.releaseDate,
             tmdbId,
-            mediaType
+            mediaType,
+            details.posterPath
           );
         }
       } catch (err) {
@@ -1021,7 +1078,11 @@ export default function DetailScreen() {
             </View>
           </ScrollView>
         ) : (
-          <ScrollView key="detail-scroll" showsVerticalScrollIndicator={false}>
+          <ScrollView
+            key="detail-scroll"
+            style={{ flex: 1 }}
+            showsVerticalScrollIndicator={false}
+          >
         <View style={styles.backdropContainer}>
           {details.backdropPath ? (
             <Image
@@ -1138,11 +1199,54 @@ export default function DetailScreen() {
         {reason ? (
           <View style={[styles.insightBanner, { backgroundColor: colors.accentMuted, borderColor: colors.accent + '22' }]}>
             <Ionicons name="sparkles-outline" size={13} color={colors.accent} style={{ marginRight: 6 }} />
-            <Text style={[styles.insightText, { color: colors.text }]} numberOfLines={1} ellipsizeMode="tail">
+            <Text style={[styles.insightText, { color: colors.text }]}>
               {reason}
             </Text>
           </View>
         ) : null}
+
+        {/* AI Taste Match Insight Card */}
+        {geminiApiKey && (aiInsightLoading || aiInsight) && (
+          <View style={[styles.aiInsightContainer, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            {aiInsightLoading ? (
+              <View style={styles.aiInsightLoadingRow}>
+                <ActivityIndicator size="small" color={colors.accent} style={{ marginRight: 10 }} />
+                <Text style={[styles.aiInsightLoadingText, { color: colors.secondary }]}>
+                  Analyzing with AI Taste Match...
+                </Text>
+              </View>
+            ) : aiInsight ? (
+              <View style={styles.aiInsightRow}>
+                <View style={[
+                  styles.aiMatchScoreBadge,
+                  { backgroundColor: aiInsight.matchScore >= 80 ? '#10b98122' : aiInsight.matchScore >= 50 ? '#f59e0b22' : '#6b728022' }
+                ]}>
+                  <Text style={[
+                    styles.aiMatchScoreText,
+                    { color: aiInsight.matchScore >= 80 ? '#10b981' : aiInsight.matchScore >= 50 ? '#f59e0b' : '#9ca3af' }
+                  ]}>
+                    {aiInsight.matchScore}%
+                  </Text>
+                  <Text style={[
+                    styles.aiMatchScoreLabel,
+                    { color: aiInsight.matchScore >= 80 ? '#10b981' : aiInsight.matchScore >= 50 ? '#f59e0b' : '#9ca3af' }
+                  ]}>
+                    Match
+                  </Text>
+                </View>
+                <View style={styles.aiInsightContent}>
+                  <View style={styles.aiInsightHeaderRow}>
+                    <Ionicons name="sparkles" size={12} color={colors.accent} style={{ marginRight: 4 }} />
+                    <Text style={[styles.aiInsightTitleText, { color: colors.secondary }]}>AI Taste Match</Text>
+                  </View>
+                  <Text style={[styles.aiInsightReasonText, { color: colors.text }]}>
+                    {aiInsight.reason}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+          </View>
+        )}
 
         {/* Action Buttons */}
         <View style={styles.actionRow}>
@@ -1150,7 +1254,7 @@ export default function DetailScreen() {
             <TouchableOpacity
               style={[
                 styles.actionButton,
-                { backgroundColor: colors.card, borderColor: colors.border },
+                { backgroundColor: colors.elevated, borderColor: colors.border },
                 itemStatus === 'watched' && { borderColor: colors.accent, backgroundColor: colors.accentMuted },
               ]}
               onPress={() => handleAction('watched')}
@@ -1175,7 +1279,7 @@ export default function DetailScreen() {
           <TouchableOpacity
             style={[
               styles.actionButton,
-              { backgroundColor: colors.card, borderColor: colors.border },
+              { backgroundColor: colors.elevated, borderColor: colors.border },
               itemStatus === 'watchlist' && { borderColor: colors.accent, backgroundColor: colors.accentMuted },
             ]}
             onPress={() => handleAction('watchlist')}
@@ -1198,7 +1302,7 @@ export default function DetailScreen() {
 
           {!isUnreleased && (
             <TouchableOpacity
-              style={[styles.actionButton, { backgroundColor: colors.card, borderColor: colors.border }]}
+              style={[styles.actionButton, { backgroundColor: colors.elevated, borderColor: colors.border }]}
               onPress={() => setIsRatingMode(true)}
             >
               <Ionicons name="star-outline" size={20} color={colors.accent} />
@@ -1211,7 +1315,7 @@ export default function DetailScreen() {
         <View style={[styles.actionRow, { marginTop: 8 }]}>
           {hasTrailer && (
             <TouchableOpacity
-              style={[styles.actionButton, { backgroundColor: colors.card, borderColor: colors.border }]}
+              style={[styles.actionButton, { backgroundColor: colors.elevated, borderColor: colors.border }]}
               onPress={openTrailer}
             >
               <Ionicons name="logo-youtube" size={20} color="#FF0000" />
@@ -1220,7 +1324,7 @@ export default function DetailScreen() {
           )}
 
           <TouchableOpacity
-            style={[styles.actionButton, { backgroundColor: colors.card, borderColor: colors.border }]}
+            style={[styles.actionButton, { backgroundColor: colors.elevated, borderColor: colors.border }]}
             onPress={() => {
               const query = encodeURIComponent(`${details.title} ${mediaType === 'tv' ? 'soundtrack' : 'OST album'}`);
               Linking.openURL(`https://music.youtube.com/search?q=${query}`);
@@ -1233,7 +1337,7 @@ export default function DetailScreen() {
           <TouchableOpacity
             style={[
               styles.actionButton,
-              { backgroundColor: colors.card, borderColor: colors.border },
+              { backgroundColor: colors.elevated, borderColor: colors.border },
               itemStatus === 'not_interested' && { borderColor: colors.accent, backgroundColor: colors.accentMuted },
             ]}
             onPress={() => handleAction('not_interested')}
@@ -1270,23 +1374,15 @@ export default function DetailScreen() {
         {/* Detailed Stats Grid */}
         <View style={styles.statsGrid}>
           {directors.length > 0 ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderWidth: 0 }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Director</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {directors.map((d: any) => d.name).join(', ')}
               </Text>
             </View>
           ) : null}
-          {cast.length > 0 ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
-              <Text style={[styles.statGridLabel, { color: colors.muted }]}>Starring</Text>
-              <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
-                {cast.slice(0, 3).map((c) => c.name).join(', ')}
-              </Text>
-            </View>
-          ) : null}
           {details.status ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderWidth: 0 }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Status</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {details.status}
@@ -1294,7 +1390,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {details.originalLanguage ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderWidth: 0 }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Language</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {details.originalLanguage.toUpperCase()}
@@ -1302,7 +1398,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {mediaType === 'movie' && details.budget ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderWidth: 0 }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Budget</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 ${(details.budget / 1000000).toFixed(1)}M
@@ -1310,7 +1406,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {mediaType === 'movie' && details.revenue ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderWidth: 0 }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Revenue</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 ${(details.revenue / 1000000).toFixed(1)}M
@@ -1318,7 +1414,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {mediaType === 'tv' && details.numberOfSeasons ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderWidth: 0 }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Seasons</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {details.numberOfSeasons}
@@ -1326,7 +1422,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {mediaType === 'tv' && details.numberOfEpisodes ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderWidth: 0 }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Episodes</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {details.numberOfEpisodes}
@@ -1334,7 +1430,7 @@ export default function DetailScreen() {
             </View>
           ) : null}
           {details.popularity ? (
-            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <View style={[styles.statGridItem, { backgroundColor: colors.card, borderWidth: 0 }]}>
               <Text style={[styles.statGridLabel, { color: colors.muted }]}>Popularity Rank</Text>
               <Text style={[styles.statGridValue, { color: colors.text }]} numberOfLines={1}>
                 {Math.round(details.popularity).toLocaleString()}
@@ -1999,16 +2095,17 @@ const styles = StyleSheet.create({
   statsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
+    justifyContent: 'space-between',
     paddingHorizontal: 20,
     marginTop: 16,
     marginBottom: 8,
-    gap: 12,
   },
   statGridItem: {
-    width: '47%',
+    width: '48.5%',
     borderRadius: 10,
     padding: 10,
-    borderWidth: 0.5,
+    borderWidth: 0,
+    marginBottom: 12,
   },
   statGridLabel: {
     fontSize: 10,
@@ -2371,6 +2468,8 @@ const styles = StyleSheet.create({
   },
   epStillContainer: {
     position: 'relative',
+    width: 100,
+    height: 62,
     borderRadius: 8,
     overflow: 'hidden',
   },
@@ -2436,5 +2535,65 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
     paddingVertical: 20,
+  },
+  aiInsightContainer: {
+    marginHorizontal: 20,
+    marginTop: 8,
+    marginBottom: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 14,
+  },
+  aiInsightLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+  },
+  aiInsightLoadingText: {
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  aiInsightRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  aiMatchScoreBadge: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  aiMatchScoreText: {
+    fontSize: 18,
+    fontWeight: '800',
+    lineHeight: 20,
+  },
+  aiMatchScoreLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    marginTop: 1,
+  },
+  aiInsightContent: {
+    flex: 1,
+  },
+  aiInsightHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  aiInsightTitleText: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  aiInsightReasonText: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '500',
   },
 });

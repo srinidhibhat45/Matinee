@@ -17,7 +17,7 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
-import { tmdbService, getImageUrl } from '../../services/tmdb';
+import { tmdbService, getImageUrl, limitConcurrency } from '../../services/tmdb';
 import { getItem, addItem, getPreference, setPreference, getAllItems, deleteItem } from '../../services/database';
 import { notificationService } from '../../services/notifications';
 import { calendarService } from '../../services/calendar';
@@ -43,13 +43,16 @@ export default function UpcomingScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeBucket, setActiveBucket] = useState<TimeBucket>('thisMonth');
-  const [showSeries, setShowSeries] = useState(true);
+  const [showSeries, setShowSeries] = useState(false);
 
   // Paging and Search states
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const [apiSearchResults, setApiSearchResults] = useState<TMDBMediaItem[]>([]);
+  const [isApiSearching, setIsApiSearching] = useState(false);
   const isFetchingRef = useRef(false);
   const loadedPageRef = useRef(1);
   const lastFetchedRef = useRef(0);
@@ -87,12 +90,44 @@ export default function UpcomingScreen() {
         setLoadingMore(true);
       }
 
-      const res = await tmdbService.getUpcomingByLanguages(selectedLanguages, pageNum, forceRefresh);
+      // 1. Get all DB items to filter out (watched and not_interested for movies; not_interested only for series)
+      const dbItems = await getAllItems();
+      const skipIds = new Set(dbItems.filter(i => {
+        if (i.mediaType === 'movie' && (i.status === 'watched' || i.status === 'not_interested')) return true;
+        if (i.mediaType === 'tv' && i.status === 'not_interested') return true;
+        return false;
+      }).map(i => i.tmdbId));
+
+      const hotdDbItem = dbItems.find(i => i.tmdbId === 94997);
+      console.log('[Upcoming Debug] dbItems count:', dbItems.length);
+      if (hotdDbItem) {
+        console.log('[Upcoming Debug] House of the Dragon found in DB, status:', hotdDbItem.status);
+      } else {
+        console.log('[Upcoming Debug] House of the Dragon NOT found in DB');
+      }
+
+      const statusMap: Record<number, string> = {};
+      dbItems.forEach((item) => {
+        statusMap[item.tmdbId] = item.status;
+      });
+      setDbStatusMap(statusMap);
+
+      // 2. Fetch the upcoming list, passing showSeries down to discovery
+      const res = await tmdbService.getUpcomingByLanguages(selectedLanguages, pageNum, forceRefresh, showSeries);
       const rawResults = res?.results || [];
 
-      // Decorate with full details (runtime, watch providers, certification, upcoming TV events)
-      const results = await Promise.all(
-        rawResults.map(async (item) => {
+      // 3. Pre-filter rawResults to avoid decorating watched/skipped items and disabled media types
+      const filteredRawResults = rawResults.filter(item => {
+        if (skipIds.has(item.id)) return false;
+        if (!showSeries && item.mediaType === 'tv') return false;
+        return true;
+      });
+
+      // 4. Decorate with full details (runtime, watch providers, certification, upcoming TV events) using limitConcurrency
+      const results = await limitConcurrency(
+        filteredRawResults,
+        5,
+        async (item) => {
           try {
             const details = await tmdbService.getDetails(item.id, item.mediaType || 'movie', forceRefresh);
             if (details) {
@@ -112,7 +147,7 @@ export default function UpcomingScreen() {
                   if (episode_number === 1) {
                     eventTitle = `Season ${season_number} Premiere`;
                   } else {
-                    eventTitle = `Season ${season_number} Airing`;
+                    eventTitle = null;
                   }
                   const s = String(season_number).padStart(2, '0');
                   const e = String(episode_number).padStart(2, '0');
@@ -153,21 +188,25 @@ export default function UpcomingScreen() {
             console.error(`Failed to load details for upcoming item ${item.id}:`, err);
           }
           return item;
-        })
+        }
       );
 
-      // Get all DB items to filter out (watched and not_interested)
-      const dbItems = await getAllItems();
-      const skipIds = new Set(dbItems.filter(i => i.status === 'watched' || i.status === 'not_interested').map(i => i.tmdbId));
-
-      const statusMap: Record<number, string> = {};
-      dbItems.forEach((item) => {
-        statusMap[item.tmdbId] = item.status;
-      });
-      setDbStatusMap(statusMap);
+      const filterByCountry = (await getPreference('PREF_FILTER_BY_COUNTRY')) === 'true';
+      let processedResults = results;
+      if (filterByCountry) {
+        processedResults = results.filter((item) => {
+          if (item.mediaType !== 'tv') return true;
+          const providers = item.watchProviders;
+          if (!providers) return false;
+          const hasFlatrate = Array.isArray(providers.flatrate) && providers.flatrate.length > 0;
+          const hasBuy = Array.isArray(providers.buy) && providers.buy.length > 0;
+          const hasRent = Array.isArray(providers.rent) && providers.rent.length > 0;
+          return hasFlatrate || hasBuy || hasRent;
+        });
+      }
 
       setUpcomingMovies((prev) => {
-        const filteredResults = results.filter((m) => !skipIds.has(m.id));
+        const filteredResults = processedResults.filter((m) => !skipIds.has(m.id));
         if (shouldAppend) {
           const existingIds = new Set(prev.map((m) => m.id));
           const newUnique = filteredResults.filter((m) => !existingIds.has(m.id));
@@ -194,7 +233,7 @@ export default function UpcomingScreen() {
       setLoadingMore(false);
       isFetchingRef.current = false;
     }
-  }, [selectedLanguages]);
+  }, [selectedLanguages, showSeries]);
 
   const [longPressItem, setLongPressItem] = useState<any | null>(null);
   const [longPressStatus, setLongPressStatus] = useState<string | null>(null);
@@ -229,12 +268,12 @@ export default function UpcomingScreen() {
       const existing = await getItem(tmdbId);
 
       if (action === 'watchlist') {
-        if (existing?.status === 'watchlist' || existing?.status === 'interested') {
+        if (existing?.status === 'watchlist') {
           await deleteItem(existing.id);
           await notificationService.cancelReminder(tmdbId);
         } else {
+          const status = 'watchlist';
           const isUnreleased = longPressItem.releaseDate ? new Date(longPressItem.releaseDate) > new Date() : false;
-          const status = isUnreleased ? 'interested' : 'watchlist';
           await addItem({
             tmdbId,
             mediaType,
@@ -256,7 +295,8 @@ export default function UpcomingScreen() {
               longPressItem.title,
               longPressItem.releaseDate,
               tmdbId,
-              mediaType
+              mediaType,
+              longPressItem.posterPath
             );
           }
         }
@@ -303,6 +343,159 @@ export default function UpcomingScreen() {
     fetchUpcoming(1, false);
   }, [fetchUpcoming, selectedLanguages]);
 
+  // Debounce search query
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // API Search for upcoming movies and shows
+  useEffect(() => {
+    let active = true;
+
+    async function performSearch() {
+      if (!debouncedSearchQuery.trim()) {
+        setApiSearchResults([]);
+        setIsApiSearching(false);
+        return;
+      }
+
+      setIsApiSearching(true);
+      try {
+        const todayStr = new Date().toISOString().split('T')[0];
+
+        // 1. Search TMDB
+        const res = await tmdbService.search(debouncedSearchQuery.trim(), undefined, 1);
+        const searchItems = res?.results || [];
+
+        if (!active) return;
+
+        // Get all DB items to filter out (watched and not_interested for movies; not_interested only for series)
+        const dbItems = await getAllItems();
+        const skipIds = new Set(dbItems.filter(i => {
+          if (i.mediaType === 'movie' && (i.status === 'watched' || i.status === 'not_interested')) return true;
+          if (i.mediaType === 'tv' && i.status === 'not_interested') return true;
+          return false;
+        }).map(i => i.tmdbId));
+
+        // Filter search results first to avoid decorating skipped items and disabled media types
+        const filteredSearchItems = searchItems.filter(item => {
+          if (skipIds.has(item.id)) return false;
+          if (!showSeries && item.mediaType === 'tv') return false;
+          return true;
+        });
+
+        // 2. Fetch details and filter/decorate using limitConcurrency
+        const decorated = await limitConcurrency(
+          filteredSearchItems,
+          5,
+          async (item) => {
+            try {
+              const details = await tmdbService.getDetails(item.id, item.mediaType || 'movie');
+              if (details) {
+                let updatedReleaseDate = item.releaseDate;
+                let upcomingEventTitle: string | undefined = undefined;
+                let upcomingEpisodeInfo: string | undefined = undefined;
+
+                if (item.mediaType === 'tv') {
+                  let upcomingDate: string | null = null;
+                  let eventTitle: string | null = null;
+
+                  // nextEpisodeToAir
+                  if (details.nextEpisodeToAir && details.nextEpisodeToAir.air_date >= todayStr) {
+                    upcomingDate = details.nextEpisodeToAir.air_date;
+                    const { season_number, episode_number } = details.nextEpisodeToAir;
+                    if (episode_number === 1) {
+                      eventTitle = `Season ${season_number} Premiere`;
+                    } else {
+                      eventTitle = null;
+                    }
+                    const s = String(season_number).padStart(2, '0');
+                    const e = String(episode_number).padStart(2, '0');
+                    upcomingEpisodeInfo = `S${s}-E${e}`;
+                  }
+
+                  // seasons list
+                  if (!upcomingDate && details.seasons) {
+                    const futureSeasons = details.seasons
+                      .filter((s: any) => s.season_number > 0 && s.air_date && s.air_date >= todayStr)
+                      .sort((a: any, b: any) => a.season_number - b.season_number);
+                    if (futureSeasons.length > 0) {
+                      upcomingDate = futureSeasons[0].air_date;
+                      const sNum = futureSeasons[0].season_number;
+                      eventTitle = `Season ${sNum} Premiere`;
+                      upcomingEpisodeInfo = `S${String(sNum).padStart(2, '0')}`;
+                    }
+                  }
+
+                  if (upcomingDate) {
+                    updatedReleaseDate = upcomingDate;
+                    upcomingEventTitle = eventTitle || undefined;
+                  } else if (item.releaseDate && item.releaseDate >= todayStr) {
+                    upcomingEventTitle = 'Series Premiere';
+                  }
+                }
+
+                return {
+                  ...item,
+                  runtime: details.runtime,
+                  certification: details.certification,
+                  watchProviders: details.watchProviders,
+                  releaseDate: updatedReleaseDate,
+                  upcomingEventTitle,
+                  upcomingEpisodeInfo,
+                };
+              }
+            } catch (err) {
+              console.error(`Failed to load details for search item ${item.id}:`, err);
+            }
+            return item;
+          }
+        );
+
+        if (!active) return;
+
+        const filterByCountry = (await getPreference('PREF_FILTER_BY_COUNTRY')) === 'true';
+        let processedDecorated = decorated;
+        if (filterByCountry) {
+          processedDecorated = decorated.filter((item) => {
+            if (item.mediaType !== 'tv') return true;
+            const providers = item.watchProviders;
+            if (!providers) return false;
+            const hasFlatrate = Array.isArray(providers.flatrate) && providers.flatrate.length > 0;
+            const hasBuy = Array.isArray(providers.buy) && providers.buy.length > 0;
+            const hasRent = Array.isArray(providers.rent) && providers.rent.length > 0;
+            return hasFlatrate || hasBuy || hasRent;
+          });
+        }
+
+        // 3. Keep only movies/shows whose release date is in the future and not skipped
+        const upcomingResults = processedDecorated.filter((m) => {
+          if (skipIds.has(m.id)) return false;
+          if (!m.releaseDate) return false;
+          return m.releaseDate >= todayStr;
+        });
+
+        setApiSearchResults(upcomingResults);
+      } catch (err) {
+        console.error('API search error:', err);
+        setApiSearchResults([]);
+      } finally {
+        if (active) {
+          setIsApiSearching(false);
+        }
+      }
+    }
+
+    performSearch();
+
+    return () => {
+      active = false;
+    };
+  }, [debouncedSearchQuery, showSeries]);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     await fetchUpcoming(1, false, true);
@@ -330,7 +523,7 @@ export default function UpcomingScreen() {
       try {
         await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         const existingStatus = dbStatusMap[item.id];
-        if (existingStatus === 'interested' || existingStatus === 'watchlist') {
+        if (existingStatus === 'watchlist') {
           const existing = await getItem(item.id);
           if (existing) {
             await deleteItem(existing.id);
@@ -354,7 +547,7 @@ export default function UpcomingScreen() {
             originalLanguage: item.originalLanguage,
             runtime: 0,
             voteAverage: item.voteAverage,
-            status: 'interested',
+            status: 'watchlist',
             watchedDate: null,
           });
 
@@ -363,12 +556,13 @@ export default function UpcomingScreen() {
             item.title,
             item.releaseDate,
             item.id,
-            item.mediaType
+            item.mediaType,
+            item.posterPath
           );
 
           setDbStatusMap((prev) => ({
             ...prev,
-            [item.id]: 'interested',
+            [item.id]: 'watchlist',
           }));
         }
       } catch (err) {
@@ -478,7 +672,7 @@ export default function UpcomingScreen() {
         ),
       ].slice(0, 3);
 
-      const isInterested = dbStatusMap[item.id] === 'interested' || dbStatusMap[item.id] === 'watchlist';
+      const isInterested = dbStatusMap[item.id] === 'watchlist';
 
       return (
         <TouchableOpacity
@@ -487,17 +681,24 @@ export default function UpcomingScreen() {
           onLongPress={() => handleItemLongPress(item)}
           activeOpacity={0.8}
         >
-          {item.posterPath ? (
-            <Image
-              source={{ uri: getImageUrl(item.posterPath, 'w185') || "" }}
-              style={styles.poster}
-              resizeMode="cover"
-            />
-          ) : (
-            <View style={[styles.poster, styles.posterPlaceholder, { backgroundColor: colors.elevated }]}>
-              <Ionicons name="film-outline" size={24} color={colors.muted} />
-            </View>
-          )}
+          <View style={styles.posterContainer}>
+            {item.posterPath ? (
+              <Image
+                source={{ uri: getImageUrl(item.posterPath, 'w185') || "" }}
+                style={styles.poster}
+                resizeMode="cover"
+              />
+            ) : (
+              <View style={[styles.poster, styles.posterPlaceholder, { backgroundColor: colors.elevated }]}>
+                <Ionicons name="film-outline" size={24} color={colors.muted} />
+              </View>
+            )}
+            {item.upcomingEventTitle ? (
+              <View style={[styles.premiereBadgeOverlay, { backgroundColor: colors.accent }]}>
+                <Ionicons name="star" size={10} color={colors.bg} />
+              </View>
+            ) : null}
+          </View>
           <View style={styles.cardInfo}>
             <View style={styles.cardMainContent}>
               <View style={styles.cardLeftCol}>
@@ -542,14 +743,6 @@ export default function UpcomingScreen() {
                     </Text>
                   </View>
 
-                  {item.upcomingEventTitle && (
-                    <View style={[styles.mediaBadge, { backgroundColor: colors.accentMuted }]}>
-                      <Text style={[styles.mediaBadgeText, { color: colors.accent }]}>
-                        {item.upcomingEventTitle}
-                      </Text>
-                    </View>
-                  )}
-
                   {item.originalLanguage && (
                     <View style={[styles.mediaBadge, { backgroundColor: colors.border }]}>
                       <Text style={[styles.mediaBadgeText, { color: colors.secondary }]}>
@@ -563,7 +756,6 @@ export default function UpcomingScreen() {
                 <View style={styles.watchPlatformSection}>
                   {providers.length > 0 ? (
                     <View style={styles.watchProvidersRow}>
-                      <Text style={[styles.watchLabel, { color: colors.secondary }]}>Watch:</Text>
                       <View style={styles.watchProvidersList}>
                         {providers.map((p: any) => (
                           <Image
@@ -721,39 +913,64 @@ export default function UpcomingScreen() {
       )}
 
       {/* Movie List */}
-      {loading && page === 1 ? (
-        <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
+      {searchQuery.trim() ? (
+        isApiSearching ? (
+          <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
+        ) : (
+          <FlatList
+            style={styles.flatList}
+            data={apiSearchResults.filter(m => showSeries || m.mediaType !== 'tv')}
+            renderItem={renderUpcomingItem}
+            keyExtractor={(item) => `upcoming-search-${item.id}`}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 100 }}
+            ListEmptyComponent={
+              <View style={styles.emptyState}>
+                <Ionicons name="search-outline" size={48} color={colors.muted} />
+                <Text style={[styles.emptyTitle, { color: colors.text }]}>No upcoming releases found</Text>
+                <Text style={[styles.emptySubtitle, { color: colors.secondary }]}>
+                  Try a different query or search term
+                </Text>
+              </View>
+            }
+          />
+        )
       ) : (
-        <FlatList
-          data={filteredMovies}
-          renderItem={renderUpcomingItem}
-          keyExtractor={(item) => `upcoming-${item.id}`}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 100 }}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.accent}
-            />
-          }
-          onEndReached={handleLoadMore}
-          onEndReachedThreshold={0.5}
-          ListFooterComponent={
-            loadingMore ? (
-              <ActivityIndicator size="small" color={colors.accent} style={{ marginVertical: 16 }} />
-            ) : null
-          }
-          ListEmptyComponent={
-            <View style={styles.emptyState}>
-              <Ionicons name="calendar-outline" size={48} color={colors.muted} />
-              <Text style={[styles.emptyTitle, { color: colors.text }]}>No upcoming releases</Text>
-              <Text style={[styles.emptySubtitle, { color: colors.secondary }]}>
-                Try selecting different languages or time period
-              </Text>
-            </View>
-          }
-        />
+        loading && page === 1 ? (
+          <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
+        ) : (
+          <FlatList
+            style={styles.flatList}
+            data={filteredMovies}
+            renderItem={renderUpcomingItem}
+            keyExtractor={(item) => `upcoming-${item.id}`}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 100 }}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor={colors.accent}
+              />
+            }
+            onEndReached={handleLoadMore}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={
+              loadingMore ? (
+                <ActivityIndicator size="small" color={colors.accent} style={{ marginVertical: 16 }} />
+              ) : null
+            }
+            ListEmptyComponent={
+              <View style={styles.emptyState}>
+                <Ionicons name="calendar-outline" size={48} color={colors.muted} />
+                <Text style={[styles.emptyTitle, { color: colors.text }]}>No upcoming releases</Text>
+                <Text style={[styles.emptySubtitle, { color: colors.secondary }]}>
+                  Try selecting different languages or time period
+                </Text>
+              </View>
+            }
+          />
+        )
       )}
 
       {/* Long Press Quick Actions Bottom Sheet */}
@@ -805,7 +1022,7 @@ export default function UpcomingScreen() {
                 >
                   <Ionicons
                     name={
-                      longPressStatus === 'watchlist' || longPressStatus === 'interested'
+                      longPressStatus === 'watchlist'
                         ? 'bookmark'
                         : 'bookmark-outline'
                     }
@@ -814,7 +1031,7 @@ export default function UpcomingScreen() {
                     style={{ marginRight: 12 }}
                   />
                   <Text style={[styles.bottomSheetOptionText, { color: colors.text }]}>
-                    {longPressStatus === 'watchlist' || longPressStatus === 'interested'
+                    {longPressStatus === 'watchlist'
                       ? 'Remove from Watchlist'
                       : 'Add to Watchlist'}
                   </Text>
@@ -876,6 +1093,7 @@ const styles = StyleSheet.create({
   },
   cardBadgesRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 6,
     alignItems: 'center',
     marginTop: 4,
@@ -918,8 +1136,25 @@ const styles = StyleSheet.create({
   },
   poster: {
     width: 100,
-    height: '100%',
-    minHeight: 150,
+    height: 150,
+  },
+  posterContainer: {
+    position: 'relative',
+    width: 100,
+    height: 150,
+  },
+  premiereBadgeOverlay: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    borderRadius: 999,
+    padding: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 1.5,
+    elevation: 2,
+    zIndex: 10,
   },
   posterPlaceholder: {
     justifyContent: 'center',
@@ -1147,5 +1382,8 @@ const styles = StyleSheet.create({
   epBadgeTextSmall: {
     fontSize: 10,
     fontWeight: '700',
+  },
+  flatList: {
+    flex: 1,
   },
 });

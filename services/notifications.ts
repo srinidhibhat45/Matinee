@@ -1,10 +1,35 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
+import { getImageUrl } from './tmdb';
 
 class NotificationService {
   private initialized = false;
 
+  private async downloadPosterLocally(posterPath: string | null | undefined, tmdbId: number): Promise<string | null> {
+    if (!posterPath) return null;
+    const remoteUrl = getImageUrl(posterPath, 'w500');
+    if (!remoteUrl) return null;
+
+    try {
+      const filename = `${tmdbId}_poster.jpg`;
+      const localUri = `${FileSystem.cacheDirectory}${filename}`;
+      
+      const fileInfo = await FileSystem.getInfoAsync(localUri);
+      if (fileInfo.exists) {
+        return localUri;
+      }
+
+      await FileSystem.downloadAsync(remoteUrl, localUri);
+      return localUri;
+    } catch (err) {
+      console.warn(`[Notifications] Failed to download poster locally:`, err);
+      return null;
+    }
+  }
+
   async initialize(): Promise<boolean> {
+    if (Platform.OS === 'web') return false;
     if (this.initialized) return true;
 
     try {
@@ -20,6 +45,17 @@ class NotificationService {
         console.warn('Notification permissions not granted');
         return false;
       }
+
+      // Register the notification category for action buttons
+      await Notifications.setNotificationCategoryAsync('movie-release-reminder', [
+        {
+          buttonTitle: '🍿 View Details',
+          identifier: 'view-movie',
+          options: {
+            opensAppToForeground: true,
+          },
+        },
+      ]);
 
       if (Platform.OS === 'android') {
         await Notifications.setNotificationChannelAsync('movie-releases', {
@@ -52,13 +88,18 @@ class NotificationService {
     title: string,
     releaseDate: string,
     tmdbId: number,
-    mediaType: 'movie' | 'tv'
+    mediaType: 'movie' | 'tv',
+    posterPath?: string | null
   ): Promise<void> {
+    if (Platform.OS === 'web') return;
     try {
       await this.initialize();
 
       const release = new Date(releaseDate);
       const now = new Date();
+
+      // Download the poster locally if available
+      const localPosterUri = await this.downloadPosterLocally(posterPath, tmdbId);
 
       // Day before reminder (9 AM)
       const dayBefore = new Date(release);
@@ -71,6 +112,16 @@ class NotificationService {
             title: `🎬 Tomorrow: ${title} releases!`,
             body: `Don't forget — ${title} drops tomorrow. Get ready!`,
             data: { tmdbId, mediaType, type: 'day-before' },
+            categoryIdentifier: 'movie-release-reminder',
+            attachments: localPosterUri
+              ? [
+                  {
+                    identifier: `${tmdbId}-day-before-poster`,
+                    url: localPosterUri,
+                    type: 'image/jpeg',
+                  },
+                ]
+              : undefined,
           },
           trigger: {
             type: Notifications.SchedulableTriggerInputTypes.DATE,
@@ -91,6 +142,16 @@ class NotificationService {
             title: `🍿 ${title} is out now!`,
             body: `${title} is now available. Time to watch!`,
             data: { tmdbId, mediaType, type: 'release-day' },
+            categoryIdentifier: 'movie-release-reminder',
+            attachments: localPosterUri
+              ? [
+                  {
+                    identifier: `${tmdbId}-release-day-poster`,
+                    url: localPosterUri,
+                    type: 'image/jpeg',
+                  },
+                ]
+              : undefined,
           },
           trigger: {
             type: Notifications.SchedulableTriggerInputTypes.DATE,
@@ -106,6 +167,7 @@ class NotificationService {
   }
 
   async cancelReminder(tmdbId: number): Promise<void> {
+    if (Platform.OS === 'web') return;
     try {
       await Notifications.cancelScheduledNotificationAsync(`${tmdbId}-day-before`);
       await Notifications.cancelScheduledNotificationAsync(`${tmdbId}-release-day`);
@@ -115,6 +177,7 @@ class NotificationService {
   }
 
   async cancelAllReminders(): Promise<void> {
+    if (Platform.OS === 'web') return;
     try {
       await Notifications.cancelAllScheduledNotificationsAsync();
     } catch (error) {
@@ -123,6 +186,7 @@ class NotificationService {
   }
 
   async getScheduledNotifications() {
+    if (Platform.OS === 'web') return [];
     try {
       return await Notifications.getAllScheduledNotificationsAsync();
     } catch (error) {

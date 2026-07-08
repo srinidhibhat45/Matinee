@@ -5,3 +5,5 @@ export { notificationService } from './notifications';
 export { calendarService } from './calendar';
 export { cloudSync } from './cloudSync';
 export { isFirebaseConfigured, getFirestoreDb } from './firebase';
+export * from './keyBinding';
+

@@ -215,6 +215,23 @@ export async function initDatabase(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_episode_ratings_item  ON episode_ratings(item_id);
       CREATE INDEX IF NOT EXISTS idx_cache_expires         ON tmdb_cache(expires_at);
       CREATE INDEX IF NOT EXISTS idx_dac_person            ON director_actor_cache(person_id);
+
+      CREATE TABLE IF NOT EXISTS in_app_notifications (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        notification_id TEXT UNIQUE NOT NULL,
+        title           TEXT NOT NULL,
+        body            TEXT NOT NULL,
+        type            TEXT NOT NULL DEFAULT 'new_release',
+        tmdb_id         INTEGER,
+        media_type      TEXT,
+        poster_path     TEXT,
+        provider_name   TEXT,
+        is_read         INTEGER DEFAULT 0,
+        created_at      TEXT DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_notifications_read      ON in_app_notifications(is_read);
+      CREATE INDEX IF NOT EXISTS idx_notifications_created   ON in_app_notifications(created_at);
     `);
 
       // Migration: Add certification column to watched_items if it doesn't exist (for existing installs)
@@ -222,6 +239,20 @@ export async function initDatabase(): Promise<void> {
         await db.execAsync('ALTER TABLE watched_items ADD COLUMN certification TEXT;');
       } catch (err) {
         // Ignored if column already exists
+      }
+
+      // Migration: Add is_dismissed column to in_app_notifications if it doesn't exist
+      try {
+        await db.execAsync('ALTER TABLE in_app_notifications ADD COLUMN is_dismissed INTEGER DEFAULT 0;');
+      } catch (err) {
+        // Ignored if column already exists
+      }
+
+      // Migration: Merge all 'interested' items into 'watchlist' status
+      try {
+        await db.execAsync("UPDATE watched_items SET status = 'watchlist' WHERE status = 'interested';");
+      } catch (err) {
+        console.error('Failed to merge interested status to watchlist:', err);
       }
 
       // Check if we need to migrate status check constraint
@@ -677,6 +708,23 @@ export async function getAllItems(
   } catch (error) {
     console.error('[Matinee DB] getAllItems failed:', error);
     throw error;
+  }
+}
+
+export async function getWatchedItemsWithDetailedRatings(): Promise<any[]> {
+  const database = await getDbAsync();
+  try {
+    const rows = await database.getAllAsync<any>(
+      `SELECT w.*, r.overall_rating, r.plot_rating, r.acting_rating, r.visuals_rating, r.soundtrack_rating, r.rewatchability, r.mood_emoji, r.review_text
+       FROM watched_items w
+       LEFT JOIN ratings r ON w.id = r.item_id
+       WHERE w.status = 'watched'
+       ORDER BY w.updated_at DESC`
+    );
+    return rows;
+  } catch (error) {
+    console.error('[Matinee DB] getWatchedItemsWithDetailedRatings failed:', error);
+    return [];
   }
 }
 
@@ -1783,3 +1831,118 @@ export async function getWatchedPeople(): Promise<PersonEntry[]> {
   }
 }
 
+export async function clearTmdbCache(): Promise<void> {
+  const database = await getDbAsync();
+  try {
+    await database.runAsync("DELETE FROM tmdb_cache");
+    console.log('[Matinee DB] TMDB cache cleared.');
+  } catch (error) {
+    console.error('[Matinee DB] clearTmdbCache failed:', error);
+  }
+}
+
+// ─── In-App Notifications ───────────────────────────────────────────
+
+export interface InAppNotification {
+  id: number;
+  notificationId: string;
+  title: string;
+  body: string;
+  type: 'new_release' | 'ott_available' | 'trending';
+  tmdbId: number | null;
+  mediaType: string | null;
+  posterPath: string | null;
+  providerName: string | null;
+  isRead: boolean;
+  createdAt: string;
+  isDismissed?: boolean;
+}
+
+export async function getInAppNotifications(limit: number = 50): Promise<InAppNotification[]> {
+  const database = await getDbAsync();
+  try {
+    const rows = await database.getAllAsync<any>(
+      'SELECT * FROM in_app_notifications WHERE is_dismissed = 0 ORDER BY created_at DESC LIMIT ?',
+      [limit]
+    );
+    return rows.map(r => ({
+      id: r.id,
+      notificationId: r.notification_id,
+      title: r.title,
+      body: r.body,
+      type: r.type,
+      tmdbId: r.tmdb_id,
+      mediaType: r.media_type,
+      posterPath: r.poster_path,
+      providerName: r.provider_name,
+      isRead: r.is_read === 1,
+      createdAt: r.created_at,
+      isDismissed: r.is_dismissed === 1,
+    }));
+  } catch (err) {
+    console.error('getInAppNotifications error:', err);
+    return [];
+  }
+}
+
+export async function addInAppNotification(notification: Omit<InAppNotification, 'id' | 'isRead' | 'createdAt' | 'isDismissed'>): Promise<void> {
+  const database = await getDbAsync();
+  try {
+    await database.runAsync(
+      `INSERT OR IGNORE INTO in_app_notifications (notification_id, title, body, type, tmdb_id, media_type, poster_path, provider_name, is_dismissed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      [
+        notification.notificationId,
+        notification.title,
+        notification.body,
+        notification.type,
+        notification.tmdbId,
+        notification.mediaType,
+        notification.posterPath,
+        notification.providerName,
+      ]
+    );
+  } catch (err) {
+    console.error('addInAppNotification error:', err);
+  }
+}
+
+export async function markNotificationRead(id: number): Promise<void> {
+  const database = await getDbAsync();
+  try {
+    await database.runAsync('UPDATE in_app_notifications SET is_read = 1 WHERE id = ?', [id]);
+  } catch (err) {
+    console.error('markNotificationRead error:', err);
+  }
+}
+
+export async function dismissNotification(id: number): Promise<void> {
+  const database = await getDbAsync();
+  try {
+    await database.runAsync('UPDATE in_app_notifications SET is_dismissed = 1 WHERE id = ?', [id]);
+  } catch (err) {
+    console.error('dismissNotification error:', err);
+  }
+}
+
+export async function getUnreadNotificationCount(): Promise<number> {
+  const database = await getDbAsync();
+  try {
+    const row = await database.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) as count FROM in_app_notifications WHERE is_read = 0 AND is_dismissed = 0'
+    );
+    return row?.count ?? 0;
+  } catch (err) {
+    console.error('getUnreadNotificationCount error:', err);
+    return 0;
+  }
+}
+
+export async function clearAllNotifications(): Promise<void> {
+  const database = await getDbAsync();
+  try {
+    await database.runAsync('UPDATE in_app_notifications SET is_dismissed = 1');
+  } catch (err) {
+    console.error('clearAllNotifications error:', err);
+  }
+}

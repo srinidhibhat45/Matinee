@@ -6,6 +6,7 @@ import {
   getPreference,
   getGenreDistribution,
   getWatchedPeople,
+  getWatchedItemsWithDetailedRatings,
 } from './database';
 import { tmdbService } from './tmdb';
 import { MOVIE_GENRES, TV_GENRES } from '../constants/genres';
@@ -387,6 +388,27 @@ class RecommendationService {
 
       console.log(`[Personalized Recs] Candidate pool size: ${candidateMap.size}`);
 
+      const geminiKey = await getPreference('PREF_GEMINI_API_KEY');
+      if (geminiKey) {
+        try {
+          const candidatesList = Array.from(candidateMap.values()).map((v) => v.item);
+          const watchedDetailed = await getWatchedItemsWithDetailedRatings();
+          
+          // Take top 15 and bottom 10 rated watched items for context efficiency
+          const highRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) >= 7).slice(0, 15);
+          const lowRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) <= 5).slice(0, 10);
+          const userProfileSeed = [...highRated, ...lowRated];
+          
+          const aiRecs = await this.getAiRecommendations(geminiKey, userProfileSeed, candidatesList, limit);
+          if (aiRecs && aiRecs.length > 0) {
+            console.log(`[Personalized Recs] Gemini AI recommendations generated successfully: ${aiRecs.length} items`);
+            return aiRecs;
+          }
+        } catch (aiErr) {
+          console.warn('[Recommendation Engine] AI recommendations call failed, falling back to heuristics:', aiErr);
+        }
+      }
+
       // Score each candidate
       const scored: RecommendedItem[] = [];
 
@@ -654,7 +676,7 @@ class RecommendationService {
       console.log(`[Personalized Recs] Generated ${finalRecs.length} recommendations. Languages present: ${Array.from(new Set(finalRecs.map(r => r.originalLanguage))).join(', ')}`);
       return finalRecs;
     } catch (error) {
-      console.error('Recommendation engine error:', error);
+      console.warn('Recommendation engine error:', error);
       return this.getRecommendationsForNewUser(limit, mediaType);
     }
   }
@@ -838,6 +860,672 @@ class RecommendationService {
       return [];
     }
   }
+
+  private async getAiRecommendations(
+    geminiKey: string,
+    watchedWithRatings: any[],
+    candidates: TMDBMediaItem[],
+    limit: number
+  ): Promise<RecommendedItem[] | null> {
+    try {
+      // 1. Build history profile
+      const historyProfile = watchedWithRatings.map((w) => ({
+        title: w.title,
+        mediaType: w.media_type,
+        overallRating: w.overall_rating,
+        plotRating: w.plot_rating ?? 'N/A',
+        actingRating: w.acting_rating ?? 'N/A',
+        visualsRating: w.visuals_rating ?? 'N/A',
+        soundtrackRating: w.soundtrack_rating ?? 'N/A',
+        rewatchability: w.rewatchability ?? 'N/A',
+        review: w.review_text ?? ''
+      }));
+
+      // 2. Build candidates list (limit to 50 candidates to avoid token blowup)
+      const candidateList = candidates.slice(0, 50).map((c) => ({
+        tmdbId: c.id,
+        title: c.title,
+        mediaType: c.mediaType,
+        genres: c.genreIds.map((id) => MOVIE_GENRES[id] || TV_GENRES[id] || '').filter(Boolean),
+        overview: c.overview ?? ''
+      }));
+
+      if (candidateList.length === 0) return [];
+
+      const systemInstruction = 
+        "You are an expert movie and TV series recommendation engine. " +
+        "You are given a list of movies/shows the user has watched along with their detailed ratings across fields: " +
+        "overall rating, plot rating, acting rating, visuals rating, soundtrack rating, and rewatchability, plus short reviews. " +
+        "Analyze these detailed ratings to understand what the user values (e.g. high visuals/soundtrack, tight plots, acting performance) and what they dislike. " +
+        "Then, score and rank the provided list of candidate movies/shows from 0.0 to 100.0. " +
+        "For each recommended candidate, provide a highly personalized, one-liner reason explaining exactly why it matches their specific taste. " +
+        "CRITICAL: Keep each reason extremely short, concise, and punchy (strict maximum of 12 words). For example: 'For its intense plot, matching your high rating of Inception.' " +
+        "Return the results in structured JSON format matching the schema.";
+
+      const prompt = `
+User Watched History and Detailed Ratings:
+${JSON.stringify(historyProfile, null, 2)}
+
+Candidate Movies to Rank:
+${JSON.stringify(candidateList, null, 2)}
+`;
+
+      let response: Response | null = null;
+      let attempt = 0;
+      const maxAttempts = 3;
+      const model = 'gemini-2.0-flash';
+
+      while (attempt < maxAttempts) {
+        try {
+          response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                contents: [
+                  {
+                    parts: [
+                      {
+                        text: prompt
+                      }
+                    ]
+                  }
+                ],
+                systemInstruction: {
+                  parts: [
+                    {
+                      text: systemInstruction
+                    }
+                  ]
+                },
+                generationConfig: {
+                  responseMimeType: 'application/json',
+                  responseSchema: {
+                    type: 'OBJECT',
+                    properties: {
+                      recommendations: {
+                        type: 'ARRAY',
+                        items: {
+                          type: 'OBJECT',
+                          properties: {
+                            tmdbId: { type: 'INTEGER' },
+                            score: { type: 'NUMBER' },
+                            reason: { type: 'STRING' }
+                          },
+                          required: ['tmdbId', 'score', 'reason']
+                        }
+                      }
+                    },
+                    required: ['recommendations']
+                  }
+                }
+              })
+            }
+          );
+
+          if (response.ok) {
+            break; // Success!
+          }
+
+          const status = response.status;
+          console.warn(`[Recommendation Engine] Gemini API attempt ${attempt + 1} returned status ${status}`);
+          
+          if (status === 503 || status === 429 || status === 504 || status >= 500) {
+            attempt++;
+            if (attempt < maxAttempts) {
+              // Wait 1s, then 2s
+              await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+              continue;
+            }
+          }
+          throw new Error(`Gemini API returned status ${status}`);
+        } catch (fetchErr) {
+          attempt++;
+          console.warn(`[Recommendation Engine] Gemini API attempt ${attempt} failed with network error:`, fetchErr);
+          if (attempt < maxAttempts) {
+            await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+            continue;
+          }
+          throw fetchErr;
+        }
+      }
+
+      if (!response || !response.ok) {
+        throw new Error(`Gemini API call failed after ${maxAttempts} attempts`);
+      }
+
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) {
+        throw new Error('Empty response from Gemini API');
+      }
+
+      const result = JSON.parse(text);
+      const recsList: { tmdbId: number; score: number; reason: string }[] = result.recommendations ?? [];
+
+      // Map back to TMDBMediaItem
+      const candidatesMap = new Map(candidates.map((c) => [c.id, c]));
+      const finalRecs: RecommendedItem[] = [];
+
+      for (const rec of recsList) {
+        const item = candidatesMap.get(rec.tmdbId);
+        if (item) {
+          finalRecs.push({
+            ...item,
+            score: Math.round(rec.score * 10) / 10,
+            reason: rec.reason
+          });
+        }
+      }
+
+      // Sort by score desc
+      return finalRecs.sort((a, b) => b.score - a.score).slice(0, limit);
+    } catch (error) {
+      console.warn('[Recommendation Engine] Gemini AI recommendations failed:', error);
+      return null;
+    }
+  }
+
+  async getMoodBasedRecommendations(prefs: MoodPreferences): Promise<MoodRecommendationResult[]> {
+    const geminiKey = await getPreference('PREF_GEMINI_API_KEY');
+
+    // Gather watch history context for taste-aware recommendations
+    const watchedItems = await getAllItems('watched');
+    const watchedDetailed = await getWatchedItemsWithDetailedRatings();
+    const highRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) >= 7).slice(0, 10);
+    const lowRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) <= 4).slice(0, 5);
+    const userProfile = [...highRated, ...lowRated];
+
+    // Get user's preferred languages
+    const langPref = await getPreference('PREF_LANGUAGES');
+    const preferredLanguages: string[] = langPref
+      ? langPref.split(',')
+      : ['en', 'hi', 'kn', 'ta', 'te', 'ko', 'ja'];
+
+    // Personalization Metrics: Top directors & actors
+    const [topDirs, topActs] = await Promise.all([
+      getTopDirectors(3),
+      getTopActors(3),
+    ]);
+
+    // Personalization Metrics: Genre affinity
+    const genreScore: Record<string, number> = {};
+    for (const w of watchedDetailed) {
+      let gNames: string[] = [];
+      try {
+        gNames = JSON.parse(w.genres) || [];
+      } catch {
+        gNames = w.genres ? w.genres.split(',').map((s: string) => s.trim()) : [];
+      }
+      const rating = w.overall_rating ?? 6;
+      const weight = rating >= 7 ? 2 : rating <= 4 ? -3 : 0;
+      for (const g of gNames) {
+        genreScore[g] = (genreScore[g] || 0) + weight;
+      }
+    }
+    const favoriteGenres = Object.entries(genreScore)
+      .filter(([_, score]) => score > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([g]) => g);
+
+    const dislikedGenres = Object.entries(genreScore)
+      .filter(([_, score]) => score < 0)
+      .map(([g]) => g);
+
+    if (geminiKey) {
+      try {
+        return await this.getMoodRecsFromGemini(
+          geminiKey,
+          prefs,
+          userProfile,
+          preferredLanguages,
+          topDirs,
+          topActs,
+          favoriteGenres,
+          dislikedGenres
+        );
+      } catch (err) {
+        console.warn('[MoodRecs] Gemini failed, falling back to TMDB discover:', err);
+      }
+    }
+
+    // Fallback: use TMDB discover with heuristic filters
+    return this.getMoodRecsFromDiscover(prefs, preferredLanguages, new Set(watchedItems.map(i => i.tmdbId)));
+  }
+
+  private async getMoodRecsFromGemini(
+    geminiKey: string,
+    prefs: MoodPreferences,
+    userProfile: any[],
+    preferredLanguages: string[],
+    topDirs: any[],
+    topActs: any[],
+    favoriteGenres: string[],
+    dislikedGenres: string[],
+  ): Promise<MoodRecommendationResult[]> {
+    const historyContext = userProfile.map((w) => ({
+      title: w.title,
+      mediaType: w.media_type,
+      overallRating: w.overall_rating,
+      plotRating: w.plot_rating ?? 'N/A',
+      actingRating: w.acting_rating ?? 'N/A',
+      visualsRating: w.visuals_rating ?? 'N/A',
+      soundtrackRating: w.soundtrack_rating ?? 'N/A',
+      review: w.review_text ?? '',
+    }));
+
+    const genreNames = prefs.genres.map((id) => MOVIE_GENRES[id] || TV_GENRES[id] || '').filter(Boolean);
+
+    const vibeLabels: Record<number, string> = {
+      1: 'Cozy & Casual (Light/low effort)',
+      2: 'Light Entertainment (Easygoing)',
+      3: 'Balanced & Engaging (Standard/thoughtful)',
+      4: 'Immersive & Thrilling (High focus/exciting)',
+      5: 'Deep & Thoughtful (Immersive/philosophical/intense)'
+    };
+    const vibeLabel = vibeLabels[prefs.vibeIntensity] || `${prefs.vibeIntensity}/5`;
+
+    const systemInstruction =
+      "You are an expert movie and TV series recommendation engine. " +
+      "Based on the user's current mood, desired vibe intensity, genre preferences, era preference, " +
+      "duration preference, and their watch history with ratings, recommend exactly 3 movies or TV shows. " +
+      "Each recommendation MUST include the exact TMDB ID (tmdb_id), title, media_type ('movie' or 'tv'), " +
+      "release_year, and a short personalized reason (max 15 words) explaining why it fits their current mood. " +
+      "Focus on accuracy: the recommendations should genuinely match the stated mood and preferences. " +
+      "Prefer titles available in the user's preferred languages: " + preferredLanguages.join(', ') + ". " +
+      "IMPORTANT: Align recommendations with the user's tastes (highly favor favorite genres/directors/actors, strictly avoid disliked genres). " +
+      "Do NOT recommend titles the user has already watched (shown in their history). " +
+      "Return results as structured JSON matching the schema.";
+
+    const prompt = `
+Current Mood: ${prefs.mood}
+Vibe Intensity: ${prefs.vibeIntensity}/5 (${vibeLabel})
+Preferred Genres: ${genreNames.length > 0 ? genreNames.join(', ') : 'Any'}
+Media Type: ${prefs.mediaType === 'both' ? 'Movies or TV Shows' : prefs.mediaType === 'movie' ? 'Movies only' : 'TV Shows only'}
+Era Preference: ${prefs.era}
+Duration Preference: ${prefs.duration}
+
+User Taste Profile (Personalization Metrics):
+- Favorite Genres: ${favoriteGenres.join(', ') || 'None recorded yet'}
+- Disliked Genres: ${dislikedGenres.join(', ') || 'None recorded yet'}
+- Top Directors User Likes: ${topDirs.map((d) => d.personName).join(', ') || 'None'}
+- Top Actors User Likes: ${topActs.map((a) => a.personName).join(', ') || 'None'}
+
+User Watch History (Do NOT recommend any of these):
+${JSON.stringify(historyContext, null, 2)}
+`;
+
+    let response: Response | null = null;
+    let attempt = 0;
+    const maxAttempts = 3;
+    const model = 'gemini-2.0-flash';
+
+    while (attempt < maxAttempts) {
+      try {
+        response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              systemInstruction: { parts: [{ text: systemInstruction }] },
+              generationConfig: {
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: 'OBJECT',
+                  properties: {
+                    recommendations: {
+                      type: 'ARRAY',
+                      items: {
+                        type: 'OBJECT',
+                        properties: {
+                          tmdb_id: { type: 'INTEGER' },
+                          title: { type: 'STRING' },
+                          media_type: { type: 'STRING' },
+                          release_year: { type: 'INTEGER' },
+                          reason: { type: 'STRING' },
+                        },
+                        required: ['tmdb_id', 'title', 'media_type', 'release_year', 'reason'],
+                      },
+                    },
+                  },
+                  required: ['recommendations'],
+                },
+              },
+            }),
+          }
+        );
+
+        if (response.ok) break;
+
+        const status = response.status;
+        console.warn(`[MoodRecs] Gemini attempt ${attempt + 1} returned status ${status}`);
+        if (status === 503 || status === 429 || status === 504 || status >= 500) {
+          attempt++;
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+            continue;
+          }
+        }
+        throw new Error(`Gemini API returned status ${status}`);
+      } catch (fetchErr) {
+        attempt++;
+        console.warn(`[MoodRecs] Gemini attempt ${attempt} failed:`, fetchErr);
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+          continue;
+        }
+        throw fetchErr;
+      }
+    }
+
+    if (!response || !response.ok) {
+      throw new Error(`Gemini API failed after ${maxAttempts} attempts`);
+    }
+
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) throw new Error('Empty response from Gemini');
+
+    const result = JSON.parse(text);
+    const recs: { tmdb_id: number; title: string; media_type: string; release_year: number; reason: string }[] =
+      result.recommendations ?? [];
+
+    // Enrich each recommendation with full TMDB data
+    const enriched: MoodRecommendationResult[] = [];
+    for (const rec of recs.slice(0, 3)) {
+      try {
+        const mediaType: MediaType = rec.media_type === 'tv' ? 'tv' : 'movie';
+        const details = await tmdbService.getDetails(rec.tmdb_id, mediaType);
+        if (details) {
+          enriched.push({
+            id: details.id,
+            title: details.title,
+            overview: details.overview,
+            posterPath: details.posterPath,
+            backdropPath: details.backdropPath,
+            releaseDate: details.releaseDate,
+            genreIds: details.genreIds,
+            originalLanguage: details.originalLanguage,
+            popularity: details.popularity,
+            voteAverage: details.voteAverage,
+            voteCount: details.voteCount,
+            mediaType,
+            runtime: details.runtime,
+            genres: details.genres,
+            reason: rec.reason,
+          });
+        }
+      } catch (detailErr) {
+        console.warn(`[MoodRecs] Failed to fetch details for ${rec.title}:`, detailErr);
+      }
+    }
+
+    return enriched;
+  }
+
+  private async getMoodRecsFromDiscover(
+    prefs: MoodPreferences,
+    preferredLanguages: string[],
+    watchedTmdbIds: Set<number>,
+  ): Promise<MoodRecommendationResult[]> {
+    // Map mood to genres heuristically
+    const moodGenreMap: Record<string, number[]> = {
+      'Happy': [35, 10751, 16],       // Comedy, Family, Animation
+      'Sad': [18, 10749],              // Drama, Romance
+      'Intense': [28, 53, 80],         // Action, Thriller, Crime
+      'Chill': [35, 16, 10751],        // Comedy, Animation, Family
+      'Funny': [35],                    // Comedy
+      'Thought-provoking': [18, 99, 9648], // Drama, Documentary, Mystery
+      'Scary': [27, 53],               // Horror, Thriller
+      'Romantic': [10749, 18],         // Romance, Drama
+    };
+
+    const moodGenres = moodGenreMap[prefs.mood] || [];
+    const selectedGenres = prefs.genres.length > 0 ? prefs.genres : moodGenres;
+
+    // Build era date filters
+    let releaseDateGte: string | undefined;
+    let releaseDateLte: string | undefined;
+    if (prefs.era.includes('Pre-2000') || prefs.era.includes('Classic')) {
+      releaseDateLte = '1999-12-31';
+    } else if (prefs.era.includes('2000s') || prefs.era.includes('2000 - 2010')) {
+      releaseDateGte = '2000-01-01';
+      releaseDateLte = '2009-12-31';
+    } else if (prefs.era.includes('2010s') || prefs.era.includes('2010 - 2020')) {
+      releaseDateGte = '2010-01-01';
+      releaseDateLte = '2019-12-31';
+    } else if (prefs.era.includes('2020+')) {
+      releaseDateGte = '2020-01-01';
+    }
+
+    const mediaTypes: MediaType[] =
+      prefs.mediaType === 'both' ? ['movie', 'tv'] :
+      [prefs.mediaType as MediaType];
+
+    const candidates: MoodRecommendationResult[] = [];
+    const lang = preferredLanguages[0] || 'en';
+
+    for (const mt of mediaTypes) {
+      try {
+        const res = await tmdbService.discover(mt, {
+          genres: selectedGenres.join(','),
+          withOriginalLanguage: lang,
+          sortBy: 'vote_average.desc',
+          voteAverageGte: 6.5,
+          releaseDateGte,
+          releaseDateLte,
+        });
+
+        for (const item of res.results) {
+          if (!watchedTmdbIds.has(item.id)) {
+            candidates.push({
+              ...item,
+              reason: `Matches your ${prefs.mood.toLowerCase()} mood`,
+            });
+          }
+        }
+      } catch {}
+    }
+
+    // Shuffle and pick top 3
+    const shuffled = candidates.sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, 3);
+  }
+
+  async getAiTasteMatchInsight(
+    geminiKey: string,
+    tmdbId: number,
+    mediaType: MediaType,
+    title: string,
+    overview: string,
+    genres: string
+  ): Promise<{ matchScore: number; reason: string } | null> {
+    try {
+      // Gather user profile ratings
+      const watchedDetailed = await getWatchedItemsWithDetailedRatings();
+      const highRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) >= 7).slice(0, 15);
+      const lowRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) <= 4).slice(0, 8);
+      const userProfile = [...highRated, ...lowRated];
+
+      const [topDirs, topActs] = await Promise.all([
+        getTopDirectors(3),
+        getTopActors(3),
+      ]);
+
+      const genreScore: Record<string, number> = {};
+      for (const w of watchedDetailed) {
+        let gNames: string[] = [];
+        try {
+          gNames = JSON.parse(w.genres) || [];
+        } catch {
+          gNames = w.genres ? w.genres.split(',').map((s: string) => s.trim()) : [];
+        }
+        const rating = w.overall_rating ?? 6;
+        const weight = rating >= 7 ? 2 : rating <= 4 ? -3 : 0;
+        for (const g of gNames) {
+          genreScore[g] = (genreScore[g] || 0) + weight;
+        }
+      }
+      const favoriteGenres = Object.entries(genreScore)
+        .filter(([_, score]) => score > 0)
+        .sort((a, b) => b[1] - a[1])
+        .map(([g]) => g);
+
+      const dislikedGenres = Object.entries(genreScore)
+        .filter(([_, score]) => score < 0)
+        .map(([g]) => g);
+
+      const historyContext = userProfile.map((w) => ({
+        title: w.title,
+        mediaType: w.media_type,
+        overallRating: w.overall_rating,
+        review: w.review_text ?? '',
+      }));
+
+      const model = 'gemini-2.0-flash';
+      const systemInstruction = 
+        "You are an expert movie and TV taste matching assistant. " +
+        "You compare a specific movie or TV show against a user's taste profile (their watch history, liked/disliked genres, directors, and actors) " +
+        "and calculate an AI Taste Match percentage score (integer 0 to 100) and provide a concise, personalized explanation (1-2 sentences, max 25 words) " +
+        "highlighting specific aspects of the movie that align or conflict with their preferences. " +
+        "Be honest and highly accurate: don't just give high scores; evaluate critically. " +
+        "Output standard JSON only matching the schema.";
+
+      const prompt = `
+Target Media details:
+- Title: ${title}
+- Media Type: ${mediaType}
+- Overview: ${overview}
+- Genres: ${genres}
+
+User Taste Profile:
+- Favorite Genres: ${favoriteGenres.join(', ') || 'None recorded yet'}
+- Disliked Genres: ${dislikedGenres.join(', ') || 'None recorded yet'}
+- Top Directors User Likes: ${topDirs.map((d) => d.personName).join(', ') || 'None'}
+- Top Actors User Likes: ${topActs.map((a) => a.personName).join(', ') || 'None'}
+
+User Watch History (with ratings):
+${JSON.stringify(historyContext, null, 2)}
+`;
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            systemInstruction: { parts: [{ text: systemInstruction }] },
+            generationConfig: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: 'OBJECT',
+                properties: {
+                  matchScore: { type: 'INTEGER' },
+                  reason: { type: 'STRING' },
+                },
+                required: ['matchScore', 'reason'],
+              },
+            },
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Taste match API returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error('Empty taste match response');
+
+      const result = JSON.parse(text);
+      return {
+        matchScore: Math.max(0, Math.min(100, Number(result.matchScore) || 50)),
+        reason: result.reason || 'No explanation provided.',
+      };
+    } catch (error) {
+      console.warn('[Recommendation Engine] Taste match insight failed:', error);
+      return null;
+    }
+  }
+
+  async generateAiReviewAssist(
+    geminiKey: string,
+    title: string,
+    mediaType: MediaType,
+    overallRating: number,
+    detailRatings: { plot: number | null; acting: number | null; visuals: number | null; soundtrack: number | null; rewatchability: number | null },
+    currentText: string
+  ): Promise<string | null> {
+    try {
+      const model = 'gemini-2.0-flash';
+      const detailsContext = [];
+      if (detailRatings.plot !== null) detailsContext.push(`Plot: ${detailRatings.plot}/5 stars`);
+      if (detailRatings.acting !== null) detailsContext.push(`Acting: ${detailRatings.acting}/5 stars`);
+      if (detailRatings.visuals !== null) detailsContext.push(`Visuals: ${detailRatings.visuals}/5 stars`);
+      if (detailRatings.soundtrack !== null) detailsContext.push(`Soundtrack: ${detailRatings.soundtrack}/5 stars`);
+      if (detailRatings.rewatchability !== null) detailsContext.push(`Rewatchability: ${detailRatings.rewatchability}/5 stars`);
+
+      const systemInstruction =
+        "You are a helpful AI assistant that helps users draft movie and TV series log thoughts. " +
+        "You will be given the media title, the user's rating (out of 10), detailed sub-ratings, and optionally some rough thoughts or a current draft. " +
+        "Write a concise, polished one-liner or two-sentence review (strictly under 180 characters) that captures their feelings. " +
+        "Avoid clichés and make it read like a genuine personal journal entry. Do not use quotes around the output, return the plain text directly.";
+
+      const prompt = `
+Media Title: ${title} (${mediaType})
+User Rating: ${overallRating}/10
+Detailed Sub-ratings: ${detailsContext.join(', ') || 'None provided'}
+User's Draft / Input: ${currentText || 'No current draft'}
+`;
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            systemInstruction: { parts: [{ text: systemInstruction }] },
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Review assist API returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error('Empty review response');
+
+      return text.trim().replace(/^"|"$/g, '');
+    } catch (error) {
+      console.warn('[Recommendation Engine] Review assist failed:', error);
+      return null;
+    }
+  }
+}
+
+export interface MoodPreferences {
+  mood: string;
+  vibeIntensity: number;
+  genres: number[];
+  mediaType: 'movie' | 'tv' | 'both';
+  era: string;
+  duration: string;
+}
+
+export interface MoodRecommendationResult extends TMDBMediaItem {
+  reason: string;
+  genres?: { id: number; name: string }[];
+  runtime?: number | null;
 }
 
 export const recommendationService = new RecommendationService();
