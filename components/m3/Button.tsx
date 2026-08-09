@@ -21,6 +21,11 @@ export interface ButtonProps {
   label: string;
   onPress?: () => void;
   variant?: ButtonVariant;
+  /**
+   * Swaps the accent roles for the error roles. M3 has no separate destructive
+   * button, so a delete action is the normal variant drawn in error colour.
+   */
+  tone?: 'primary' | 'error';
   size?: ButtonSize;
   icon?: keyof typeof Ionicons.glyphMap;
   /** Places the icon after the label — for "next"/"open" style affordances. */
@@ -52,6 +57,7 @@ export default function Button({
   label,
   onPress,
   variant = 'filled',
+  tone = 'primary',
   size = 'medium',
   icon,
   trailingIcon = false,
@@ -97,34 +103,39 @@ export default function Button({
       }
     }
 
+    const accent = tone === 'error' ? colors.error : colors.primary;
+    const onAccent = tone === 'error' ? colors.onError : colors.onPrimary;
+    const container = tone === 'error' ? colors.errorContainer : colors.secondaryContainer;
+    const onContainer = tone === 'error' ? colors.onErrorContainer : colors.onSecondaryContainer;
+
     switch (variant) {
       case 'filled':
         return {
-          container: { backgroundColor: colors.primary },
-          content: colors.onPrimary,
-          stateLayerColor: colors.onPrimary,
+          container: { backgroundColor: accent },
+          content: onAccent,
+          stateLayerColor: onAccent,
         };
       case 'tonal':
         return {
-          container: { backgroundColor: colors.secondaryContainer },
-          content: colors.onSecondaryContainer,
-          stateLayerColor: colors.onSecondaryContainer,
+          container: { backgroundColor: container },
+          content: onContainer,
+          stateLayerColor: onContainer,
         };
       case 'outlined':
         return {
           container: {
             backgroundColor: 'transparent',
             borderWidth: 1,
-            borderColor: colors.outline,
+            borderColor: tone === 'error' ? colors.error : colors.outline,
           },
-          content: colors.primary,
-          stateLayerColor: colors.primary,
+          content: accent,
+          stateLayerColor: accent,
         };
       case 'text':
         return {
           container: { backgroundColor: 'transparent' },
-          content: colors.primary,
-          stateLayerColor: colors.primary,
+          content: accent,
+          stateLayerColor: accent,
         };
       case 'elevated':
         return {
@@ -132,11 +143,11 @@ export default function Button({
             backgroundColor: colors.surfaceContainerLow,
             ...elevation(1, colors.shadow),
           },
-          content: colors.primary,
-          stateLayerColor: colors.primary,
+          content: accent,
+          stateLayerColor: accent,
         };
     }
-  }, [variant, isDisabled, colors]);
+  }, [variant, tone, isDisabled, colors]);
 
   const iconNode = icon ? (
     <Ionicons name={icon} size={dims.icon} color={content} />

@@ -1097,23 +1097,16 @@ export default function ProfileScreen() {
       </SettingsGroup>
 
       {/* Danger zone */}
-      <View
-        style={[
-          styles.dangerZone,
-          { borderColor: colors.error, backgroundColor: colors.errorContainer },
-        ]}
-      >
+      {/* Outlined rather than filled: M3 reserves a solid error fill for an
+          active problem, not for a section that merely contains risky actions. */}
+      <View style={[styles.dangerZone, { borderColor: colors.error }]}>
         <View style={styles.groupHeader}>
-          <Ionicons name="warning-outline" size={20} color={colors.onErrorContainer} />
-          <Text
-            variant="titleMedium"
-            color={colors.onErrorContainer}
-            accessibilityRole="header"
-          >
+          <Ionicons name="warning-outline" size={20} color={colors.error} />
+          <Text variant="titleMedium" color={colors.error} accessibilityRole="header">
             Danger zone
           </Text>
         </View>
-        <Text variant="bodyMedium" color={colors.onErrorContainer}>
+        <Text variant="bodyMedium" color={colors.onSurfaceVariant}>
           These actions cannot be undone.
         </Text>
         <View style={styles.buttonRow}>
@@ -1121,14 +1114,18 @@ export default function ProfileScreen() {
             label="Clear local data"
             icon="trash-outline"
             variant="outlined"
+            tone="error"
             onPress={handleClearLocal}
+            accessibilityHint="Deletes everything stored on this device"
           />
           <Button
             label={resetBusy ? 'Resetting…' : 'Delete all and reset'}
             icon="nuclear-outline"
             variant="filled"
+            tone="error"
             onPress={handleResetAll}
             loading={resetBusy}
+            accessibilityHint="Deletes local and cloud data, and clears your saved keys"
           />
         </View>
       </View>
@@ -1273,6 +1270,7 @@ export default function ProfileScreen() {
             <Button
               label={confirmModal?.confirmText ?? 'OK'}
               variant={confirmModal?.isDestructive ? 'filled' : 'text'}
+              tone={confirmModal?.isDestructive ? 'error' : 'primary'}
               onPress={() => {
                 const action = confirmModal?.onConfirm;
                 setConfirmModal(null);

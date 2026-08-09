@@ -3,11 +3,7 @@ import { Tabs } from 'expo-router';
 import { StyleSheet, View } from 'react-native';
 import { useTheme } from '../../context/ThemeContext';
 import { useResponsive } from '../../hooks/useResponsive';
-import {
-  AdaptiveNavigation,
-  NAVIGATION_RAIL_WIDTH,
-  type NavDestination,
-} from '../../components/m3';
+import { AdaptiveNavigation, type NavDestination } from '../../components/m3';
 import AiRecommendFab from '../../components/AiRecommendFab';
 
 /**
@@ -82,7 +78,7 @@ export default function TabLayout() {
       </Tabs>
 
       {/* AI recommendation FAB — floats above every tab screen. */}
-      <AiRecommendFab railOffset={isCompact ? 0 : NAVIGATION_RAIL_WIDTH} />
+      <AiRecommendFab />
     </View>
   );
 }

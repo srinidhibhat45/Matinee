@@ -78,15 +78,7 @@ const ALL_GENRE_IDS = [
 
 // ─── Component ────────────────────────────────────────────────
 
-interface AiRecommendFabProps {
-  /**
-   * Width of the navigation rail when one is showing, so the FAB clears it on
-   * wide windows instead of floating over the destinations.
-   */
-  railOffset?: number;
-}
-
-export default function AiRecommendFab({ railOffset = 0 }: AiRecommendFabProps) {
+export default function AiRecommendFab() {
   const { colors, isDark } = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
@@ -203,7 +195,8 @@ export default function AiRecommendFab({ railOffset = 0 }: AiRecommendFabProps) 
 
   return (
     <>
-      {/* FAB — clears the navigation bar on phones and the rail on wide windows. */}
+      {/* FAB. It is right-anchored, so only the bottom navigation bar can sit
+          under it — the rail is on the opposite edge and needs no allowance. */}
       <View
         style={[
           styles.fabContainer,
@@ -211,7 +204,7 @@ export default function AiRecommendFab({ railOffset = 0 }: AiRecommendFabProps) 
             bottom: isCompact
               ? NAVIGATION_BAR_HEIGHT + insets.bottom + spacing.lg
               : Math.max(insets.bottom, spacing.lg) + spacing.lg,
-            right: spacing.lg + (railOffset > 0 ? 0 : 0),
+            right: spacing.lg,
           },
         ]}
       >
