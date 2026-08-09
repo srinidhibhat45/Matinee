@@ -1,0 +1,97 @@
+name: Publish OTA Update
+
+# Ships JavaScript/asset changes straight to installed apps via EAS Update.
+# Native changes (new native modules, config plugins, app version bumps)
+# cannot travel over-the-air — those are detected here and routed to the
+# APK build workflow instead.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'EAS Update branch to publish to'
+        required: false
+        default: 'preview'
+
+concurrency:
+  group: ota-update-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Check for native changes
+    runs-on: ubuntu-latest
+    outputs:
+      native_changed: ${{ steps.detect.outputs.native_changed }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect native-affecting changes
+        id: detect
+        run: |
+          # A manual dispatch always publishes — the operator is asserting
+          # the installed binaries are compatible.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "native_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          NATIVE=false
+
+          # Native project dirs and lockfile/dependency changes require a rebuild.
+          if echo "$CHANGED" | grep -qE '^(android|ios)/'; then NATIVE=true; fi
+          if echo "$CHANGED" | grep -qE '^package(-lock)?\.json$'; then NATIVE=true; fi
+          if echo "$CHANGED" | grep -qE '^(app\.json|app\.config\.[jt]s|eas\.json)$'; then NATIVE=true; fi
+
+          echo "native_changed=$NATIVE" >> "$GITHUB_OUTPUT"
+          if [ "$NATIVE" = "true" ]; then
+            echo "::notice::Native-affecting files changed — skipping OTA. Bump the app version and run the APK build workflow."
+          fi
+
+  publish:
+    name: Publish to EAS Update
+    needs: guard
+    if: needs.guard.outputs.native_changed == 'false'
+    runs-on: ubuntu-latest
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Expo & EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Publish update
+        run: |
+          BRANCH="${{ github.event.inputs.branch || 'preview' }}"
+          echo "Publishing OTA update to branch: $BRANCH"
+          npx eas-cli update \
+            --branch "$BRANCH" \
+            --message "${{ github.event.head_commit.message || 'Manual OTA publish' }}" \
+            --non-interactive

@@ -9,6 +9,7 @@ import type {
 } from '../types';
 import { cloudSync } from './cloudSync';
 import type { CloudData } from './cloudSync';
+import { parseStoredGenres } from '../constants/genres';
 
 export let dbChangeTimestamp = Date.now();
 
@@ -140,7 +141,7 @@ export async function initDatabase(): Promise<void> {
       await db.execAsync(`
       CREATE TABLE IF NOT EXISTS watched_items (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
-        tmdb_id           INTEGER NOT NULL UNIQUE,
+        tmdb_id           INTEGER NOT NULL,
         media_type        TEXT    NOT NULL CHECK (media_type IN ('movie', 'tv')),
         title             TEXT    NOT NULL,
         poster_path       TEXT,
@@ -156,7 +157,8 @@ export async function initDatabase(): Promise<void> {
         watched_date      TEXT,
         created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
         updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
-        certification     TEXT
+        certification     TEXT,
+        UNIQUE (tmdb_id, media_type)
       );
 
       CREATE TABLE IF NOT EXISTS ratings (
@@ -255,6 +257,25 @@ export async function initDatabase(): Promise<void> {
         console.error('Failed to merge interested status to watchlist:', err);
       }
 
+      // Migration: collapse duplicate ratings to one row per item.
+      // Ratings used to be inserted rather than upserted, so re-rating a title
+      // stacked rows — duplicating it in every list that joins this table.
+      // Keeping the newest row per item and enforcing uniqueness afterwards
+      // makes the ON CONFLICT upsert in addRating() work.
+      try {
+        await db.execAsync(`
+          DELETE FROM ratings
+          WHERE id NOT IN (
+            SELECT MAX(id) FROM ratings GROUP BY item_id
+          );
+        `);
+        await db.execAsync(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_ratings_item_unique ON ratings(item_id);'
+        );
+      } catch (err) {
+        console.error('[Matinee DB] Failed to de-duplicate ratings:', err);
+      }
+
       // Check if we need to migrate status check constraint
       const tableSqlRow = await db.getFirstAsync<{ sql: string }>(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='watched_items'"
@@ -306,6 +327,72 @@ export async function initDatabase(): Promise<void> {
         } catch (migrationError) {
           await db.execAsync('ROLLBACK;');
           console.error('[Matinee DB] Migration failed:', migrationError);
+        } finally {
+          await db.execAsync('PRAGMA legacy_alter_table = OFF;');
+          await db.execAsync('PRAGMA foreign_keys = ON;');
+        }
+      }
+
+      // Migration: scope uniqueness to (tmdb_id, media_type).
+      // TMDB numbers movies and series in separate namespaces, so id 1399 is
+      // both a film and "Game of Thrones". A globally UNIQUE tmdb_id meant
+      // saving one silently overwrote the status of the other.
+      const uniquenessRow = await db.getFirstAsync<{ sql: string }>(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='watched_items'"
+      );
+      if (uniquenessRow && !uniquenessRow.sql.includes('UNIQUE (tmdb_id, media_type)')) {
+        console.log('[Matinee DB] Migrating watched_items to per-media-type uniqueness...');
+        await db.execAsync('PRAGMA foreign_keys = OFF;');
+        await db.execAsync('PRAGMA legacy_alter_table = ON;');
+        await db.execAsync('BEGIN TRANSACTION;');
+        try {
+          // Clear any leftover scratch table from a previously interrupted run,
+          // otherwise the RENAME below fails and the migration can never finish.
+          await db.execAsync('DROP TABLE IF EXISTS watched_items_pre_mt;');
+          await db.execAsync('ALTER TABLE watched_items RENAME TO watched_items_pre_mt;');
+          await db.execAsync(`
+            CREATE TABLE watched_items (
+              id                INTEGER PRIMARY KEY AUTOINCREMENT,
+              tmdb_id           INTEGER NOT NULL,
+              media_type        TEXT    NOT NULL CHECK (media_type IN ('movie', 'tv')),
+              title             TEXT    NOT NULL,
+              poster_path       TEXT,
+              backdrop_path     TEXT,
+              overview          TEXT,
+              release_date      TEXT,
+              genres            TEXT    DEFAULT '[]',
+              original_language TEXT,
+              runtime           INTEGER,
+              vote_average      REAL,
+              status            TEXT    NOT NULL DEFAULT 'watched'
+                                CHECK (status IN ('watched', 'watchlist', 'interested', 'not_interested')),
+              watched_date      TEXT,
+              created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+              updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+              certification     TEXT,
+              UNIQUE (tmdb_id, media_type)
+            );
+          `);
+          // Row ids are preserved so ratings / episode_ratings /
+          // director_actor_cache foreign keys keep pointing at the right item.
+          await db.execAsync(`
+            INSERT INTO watched_items (
+              id, tmdb_id, media_type, title, poster_path, backdrop_path, overview,
+              release_date, genres, original_language, runtime, vote_average,
+              status, watched_date, created_at, updated_at, certification
+            )
+            SELECT
+              id, tmdb_id, media_type, title, poster_path, backdrop_path, overview,
+              release_date, genres, original_language, runtime, vote_average,
+              status, watched_date, created_at, updated_at, certification
+            FROM watched_items_pre_mt;
+          `);
+          await db.execAsync('DROP TABLE watched_items_pre_mt;');
+          await db.execAsync('COMMIT;');
+          console.log('[Matinee DB] Uniqueness migration completed successfully.');
+        } catch (migrationError) {
+          await db.execAsync('ROLLBACK;');
+          console.error('[Matinee DB] Uniqueness migration failed:', migrationError);
         } finally {
           await db.execAsync('PRAGMA legacy_alter_table = OFF;');
           await db.execAsync('PRAGMA foreign_keys = ON;');
@@ -528,7 +615,7 @@ function rowToRating(row: RatingRow): Rating {
 export async function addItem(item: NewWatchedItem): Promise<number> {
   const database = await getDbAsync();
   try {
-    const existing = await getItem(item.tmdbId);
+    const existing = await getItem(item.tmdbId, item.mediaType);
     if (existing) {
       await updateItem(existing.id, {
         status: item.status,
@@ -563,7 +650,7 @@ export async function addItem(item: NewWatchedItem): Promise<number> {
     );
 
     // ── Cloud sync (fire-and-forget) ──
-    const saved = await getItem(item.tmdbId);
+    const saved = await getItem(item.tmdbId, item.mediaType);
     if (saved) {
       cloudSync.pushItem(saved).catch(() => {});
     }
@@ -659,13 +746,28 @@ export async function deleteItem(id: number): Promise<void> {
   }
 }
 
-export async function getItem(tmdbId: number): Promise<WatchedItem | null> {
+/**
+ * Look up a library entry.
+ *
+ * `mediaType` should be supplied whenever it is known: TMDB ids are only
+ * unique within a media type, so omitting it can return the movie when the
+ * caller meant the series of the same id.
+ */
+export async function getItem(
+  tmdbId: number,
+  mediaType?: MediaType
+): Promise<WatchedItem | null> {
   const database = await getDbAsync();
   try {
-    const row = await database.getFirstAsync<WatchedItemRow>(
-      'SELECT * FROM watched_items WHERE tmdb_id = ?',
-      [tmdbId]
-    );
+    const row = mediaType
+      ? await database.getFirstAsync<WatchedItemRow>(
+          'SELECT * FROM watched_items WHERE tmdb_id = ? AND media_type = ?',
+          [tmdbId, mediaType]
+        )
+      : await database.getFirstAsync<WatchedItemRow>(
+          'SELECT * FROM watched_items WHERE tmdb_id = ?',
+          [tmdbId]
+        );
     return row ? rowToWatchedItem(row) : null;
   } catch (error) {
     console.error('[Matinee DB] getItem failed:', error);
@@ -751,6 +853,14 @@ export async function getRecentItems(
 //  RATINGS – CRUD
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/**
+ * Save the user's rating for an item, replacing any previous one.
+ *
+ * A watched item has exactly one rating. Blindly inserting (as an earlier
+ * version did) left several rating rows per item, which duplicated every
+ * affected title in the library lists that LEFT JOIN this table, and
+ * double-counted them in the ratings distribution chart.
+ */
 export async function addRating(rating: NewRating): Promise<number> {
   const database = await getDbAsync();
   try {
@@ -758,7 +868,16 @@ export async function addRating(rating: NewRating): Promise<number> {
       `INSERT INTO ratings
         (item_id, overall_rating, plot_rating, acting_rating, visuals_rating,
          soundtrack_rating, rewatchability, mood_emoji, review_text)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(item_id) DO UPDATE SET
+         overall_rating    = excluded.overall_rating,
+         plot_rating       = excluded.plot_rating,
+         acting_rating     = excluded.acting_rating,
+         visuals_rating    = excluded.visuals_rating,
+         soundtrack_rating = excluded.soundtrack_rating,
+         rewatchability    = excluded.rewatchability,
+         mood_emoji        = excluded.mood_emoji,
+         review_text       = excluded.review_text`,
       [
         rating.itemId,
         rating.overallRating,
@@ -863,6 +982,20 @@ export async function updateRating(
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  TMDB CACHE
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Drop a single cache entry. Needed by force-refresh paths: pull-to-refresh
+ * used to clear only the legacy AsyncStorage copy, so the SQLite entry was
+ * still served and the refresh appeared to do nothing.
+ */
+export async function deleteCache(key: string): Promise<void> {
+  const database = await getDbAsync();
+  try {
+    await database.runAsync('DELETE FROM tmdb_cache WHERE cache_key = ?', [key]);
+  } catch (error) {
+    console.warn('[Matinee DB] deleteCache failed:', error);
+  }
+}
 
 export async function getCache<T = unknown>(key: string): Promise<T | null> {
   const database = await getDbAsync();
@@ -1319,7 +1452,6 @@ export async function getWatchStats(year?: number): Promise<WatchStats> {
       avgParams.push(`${year}-01-01`, `${year + 1}-01-01`);
     }
     const avgRow = await database.getFirstAsync<{ averageRating: number | null }>(avgQuery, avgParams);
-    console.log('[Matinee DB] getWatchStats averageRating result:', { avgRow, avgParams, year });
 
     return {
       totalWatched: row?.totalWatched ?? 0,
@@ -1334,14 +1466,21 @@ export async function getWatchStats(year?: number): Promise<WatchStats> {
   }
 }
 
+/**
+ * Genre breakdown of watched titles, aggregated by canonical genre name.
+ *
+ * Counting raw TMDB ids would split the same genre in two — a sci-fi film is
+ * 878 while a sci-fi series is 10765 — producing duplicate slices in the
+ * chart. Resolving to canonical names merges them.
+ */
 export async function getGenreDistribution(year?: number): Promise<GenreCount[]> {
   const database = await getDbAsync();
   try {
     let query = `
       SELECT
-         j.value AS genre,
-         COUNT(*) AS count
-      FROM watched_items w, json_each(w.genres) j
+         w.genres AS genres,
+         w.media_type AS media_type
+      FROM watched_items w
       WHERE w.status = 'watched'
     `;
     const params: SQLiteBindValue[] = [];
@@ -1349,9 +1488,22 @@ export async function getGenreDistribution(year?: number): Promise<GenreCount[]>
       query += ' AND substr(w.watched_date, 1, 10) >= ? AND substr(w.watched_date, 1, 10) < ?';
       params.push(`${year}-01-01`, `${year + 1}-01-01`);
     }
-    query += ' GROUP BY j.value ORDER BY count DESC';
 
-    return await database.getAllAsync<GenreCount>(query, params);
+    const rows = await database.getAllAsync<{ genres: string; media_type: string }>(
+      query,
+      params
+    );
+
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      for (const tag of parseStoredGenres(row.genres)) {
+        counts.set(tag, (counts.get(tag) || 0) + 1);
+      }
+    }
+
+    return Array.from(counts.entries())
+      .map(([genre, count]) => ({ genre, count }))
+      .sort((a, b) => b.count - a.count);
   } catch (error) {
     console.error('[Matinee DB] getGenreDistribution failed:', error);
     return [];
@@ -1620,7 +1772,10 @@ export async function mergeCloudData(data: CloudData): Promise<void> {
 
   // 1. Merge watched items
   for (const [, itemData] of Object.entries(data.watchedItems)) {
-    const existing = await getItem(itemData.tmdbId as number);
+    const existing = await getItem(
+      itemData.tmdbId as number,
+      itemData.mediaType as MediaType | undefined
+    );
     const cloudUpdated = itemData.updatedAt as string || '';
 
     if (existing) {

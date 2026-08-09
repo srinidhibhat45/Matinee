@@ -17,7 +17,7 @@ import {
   clearAllNotifications,
   InAppNotification,
 } from './database';
-import { MOVIE_GENRES, TV_GENRES } from '../constants/genres';
+import { MOVIE_GENRES, TV_GENRES, parseStoredGenres } from '../constants/genres';
 
 // ─── Types ─────────────────────────────────────────────────
 
@@ -52,24 +52,26 @@ class InAppNotificationService {
 
       // Get all user items to build interest profile and check OTT transitions
       const allItems = await getAllItems();
-      const watchedIds = new Set(
+      const watchedKeys = new Set(
         allItems
           .filter((i: any) => i.status === 'watched')
-          .map((i: any) => i.tmdbId)
+          .map((i: any) => `${i.mediaType}-${i.tmdbId}`)
       );
       const interestedItems = allItems.filter(
         (i: any) => i.status === 'watchlist'
       );
 
-      // Get the user's favorite genres from watched items
+      // Get the user's favorite genres from watched items.
+      // The `genres` column is a JSON array of TMDB ids — splitting it on
+      // commas (the previous approach) yielded fragments like "[28" that
+      // never matched a genre, so the profile was always empty.
       const genreCounts: Record<string, number> = {};
       allItems
         .filter((i: any) => i.status === 'watched' && i.genres)
         .forEach((item: any) => {
-          const genres = item.genres.split(',').map((g: string) => g.trim());
-          genres.forEach((g: string) => {
-            genreCounts[g] = (genreCounts[g] || 0) + 1;
-          });
+          for (const tag of parseStoredGenres(item.genres)) {
+            genreCounts[tag] = (genreCounts[tag] || 0) + 1;
+          }
         });
       const topGenres = Object.entries(genreCounts)
         .sort(([, a], [, b]) => b - a)
@@ -78,7 +80,7 @@ class InAppNotificationService {
 
       // Run both generation tasks in parallel
       await Promise.allSettled([
-        this.generateNewReleaseNotifications(langs, topGenres, watchedIds),
+        this.generateNewReleaseNotifications(langs, topGenres, watchedKeys),
         this.generateOttTransitionNotifications(interestedItems, ottProviderIds, country),
       ]);
     } catch (err) {
@@ -95,7 +97,7 @@ class InAppNotificationService {
   private async generateNewReleaseNotifications(
     langs: string[],
     topGenres: string[],
-    watchedIds: Set<number>,
+    watchedKeys: Set<string>,
   ): Promise<void> {
     try {
       // 1. Fetch top personalized recommendations
@@ -131,15 +133,16 @@ class InAppNotificationService {
       // If we have personalized recommendations, process them!
       if (recs && recs.length > 0) {
         const filteredRecs = recs
-          .filter((item: any) => !watchedIds.has(item.id))
+          .filter((item: any) => !watchedKeys.has(`${item.mediaType || 'movie'}-${item.id}`))
           .slice(0, 8);
 
         for (const item of filteredRecs) {
-          const score = item.score || 8.0;
-          const scorePercent = Math.round(score * 10);
-          
+          // Recommendation scores are already on a 0-100-ish scale; the old
+          // `score * 10` produced nonsense like "1200% Taste Match".
+          const scorePercent = Math.max(1, Math.min(100, Math.round(item.score ?? 70)));
+
           notificationsToAdd.push({
-            notificationId: `ai_rec_${item.id}_${dateLte}`,
+            notificationId: `ai_rec_${item.mediaType || 'movie'}_${item.id}_${dateLte}`,
             title: `Recommended: ${item.title || item.name}`,
             body: `🔥 ${scorePercent}% Taste Match! ${item.reason || 'Matches your favorite genres and directors.'}`,
             type: 'trending',
@@ -167,7 +170,12 @@ class InAppNotificationService {
         const discoverItems = results
           .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled' && !!r.value)
           .flatMap((r) => r.value.results || [])
-          .filter((item: any) => item && !watchedIds.has(item.id) && item.voteAverage >= 6.0)
+          .filter(
+            (item: any) =>
+              item &&
+              !watchedKeys.has(`${item.mediaType || 'movie'}-${item.id}`) &&
+              item.voteAverage >= 6.0
+          )
           .slice(0, 5);
 
         for (const item of discoverItems) {
@@ -179,7 +187,7 @@ class InAppNotificationService {
           const genreText = genreNames.length > 0 ? ` · ${genreNames.join(', ')}` : '';
 
           notificationsToAdd.push({
-            notificationId: `new_release_${item.id}_${dateLte}`,
+            notificationId: `new_release_${item.mediaType || 'movie'}_${item.id}_${dateLte}`,
             title: item.title || 'New Release',
             body: `New ${item.mediaType === 'tv' ? 'series' : 'movie'} release ⭐ ${item.voteAverage?.toFixed(1)}${genreText}`,
             type: 'new_release',

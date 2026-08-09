@@ -6,7 +6,13 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MOVIE_GENRES, TV_GENRES } from '../constants/genres';
-import { getPreference, getCache as getSqliteCache, setCache as setSqliteCache, clearTmdbCache } from './database';
+import {
+  getPreference,
+  getCache as getSqliteCache,
+  setCache as setSqliteCache,
+  deleteCache as deleteSqliteCache,
+  clearTmdbCache,
+} from './database';
 
 import type {
   MediaType,
@@ -38,6 +44,20 @@ const TMDB_HOSTS = [
 ];
 
 let activeBaseUrl = 'https://api.themoviedb.org/3';
+
+/**
+ * Whether the user has opted into adult results.
+ *
+ * The Settings toggle wrote this preference but nothing ever read it, so the
+ * switch had no effect on any request. Both search and discover now honour it.
+ */
+async function getIncludeAdult(): Promise<boolean> {
+  try {
+    return (await getPreference('PREF_ADULT_CONTENT')) === 'true';
+  } catch {
+    return false;
+  }
+}
 
 async function getApiProxy(): Promise<string | null> {
   try {
@@ -164,6 +184,23 @@ async function setCache<T>(key: string, data: T, ttl: number): Promise<void> {
   }
 }
 
+/**
+ * Invalidate one cached response across both the SQLite cache and the legacy
+ * AsyncStorage cache, so a force-refresh actually reaches the network.
+ */
+async function invalidateCache(key: string): Promise<void> {
+  try {
+    await deleteSqliteCache(key);
+  } catch {
+    // Non-critical
+  }
+  try {
+    await AsyncStorage.removeItem(`${CACHE_PREFIX}${key}`);
+  } catch {
+    // Non-critical
+  }
+}
+
 async function clearAllCache(): Promise<void> {
   try {
     await clearTmdbCache();
@@ -238,6 +275,7 @@ async function tmdbFetch<T>(
   params: Record<string, string | number | undefined> = {},
   cacheKey?: string,
   cacheTtl: number = CACHE_TTL.list,
+  rateLimitRetries = 0,
 ): Promise<T | null> {
   // Check cache first
   if (cacheKey) {
@@ -310,9 +348,17 @@ async function tmdbFetch<T>(
 
       if (!response.ok) {
         if (response.status === 429) {
-          console.warn('[TMDB] 429 Rate limit exceeded. Backing off…');
-          await new Promise((r) => setTimeout(r, 1000));
-          return tmdbFetch<T>(path, params, cacheKey, cacheTtl);
+          // Bounded exponential backoff. Retrying unconditionally (the previous
+          // behaviour) could recurse forever against a sustained rate limit.
+          const MAX_RATE_LIMIT_RETRIES = 3;
+          if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
+            console.warn('[TMDB] 429 Rate limit persists after retries. Giving up.');
+            return null;
+          }
+          const delay = 1000 * Math.pow(2, rateLimitRetries);
+          console.warn(`[TMDB] 429 Rate limit exceeded. Backing off ${delay}ms…`);
+          await new Promise((r) => setTimeout(r, delay));
+          return tmdbFetch<T>(path, params, cacheKey, cacheTtl, rateLimitRetries + 1);
         }
         if (response.status === 401) {
           console.warn('[TMDB] 401 Unauthorized — check your API Bearer token.');
@@ -567,8 +613,10 @@ export const tmdbService = {
     mediaType: 'movie' | 'tv' | 'all' = 'all',
     timeWindow: 'day' | 'week' = 'week',
     page: number = 1,
+    forceRefresh = false,
   ): Promise<PaginatedResponse<TMDBMediaItem>> {
     const cacheKey = `trending:${mediaType}:${timeWindow}:${page}`;
+    if (forceRefresh) await invalidateCache(cacheKey);
     const raw = await tmdbFetch<RawPage>(
       `/trending/${mediaType}/${timeWindow}`,
       { page: String(page) },
@@ -589,8 +637,10 @@ export const tmdbService = {
   async getPopular(
     mediaType: MediaType = 'movie',
     page = 1,
+    forceRefresh = false,
   ): Promise<PaginatedResponse<TMDBMediaItem>> {
     const cacheKey = `popular:${mediaType}:${page}`;
+    if (forceRefresh) await invalidateCache(cacheKey);
     const endpoint = mediaType === 'movie' ? '/movie/popular' : '/tv/popular';
     const raw = await tmdbFetch<RawPage>(endpoint, { page }, cacheKey);
     return toPaginated(raw, mediaType === 'movie' ? normalizeMovie : normalizeTVShow);
@@ -602,8 +652,10 @@ export const tmdbService = {
   async getTopRated(
     mediaType: MediaType = 'movie',
     page = 1,
+    forceRefresh = false,
   ): Promise<PaginatedResponse<TMDBMediaItem>> {
     const cacheKey = `top_rated:${mediaType}:${page}`;
+    if (forceRefresh) await invalidateCache(cacheKey);
     const endpoint =
       mediaType === 'movie' ? '/movie/top_rated' : '/tv/top_rated';
     const raw = await tmdbFetch<RawPage>(endpoint, { page }, cacheKey);
@@ -632,9 +684,7 @@ export const tmdbService = {
   ): Promise<TMDBMediaDetails | null> {
     const cacheKey = `details:${mediaType}:${id}`;
     if (forceRefresh) {
-      try {
-        await AsyncStorage.removeItem(`${CACHE_PREFIX}${cacheKey}`);
-      } catch {}
+      await invalidateCache(cacheKey);
     }
     const endpoint = mediaType === 'movie' ? `/movie/${id}` : `/tv/${id}`;
     
@@ -768,33 +818,38 @@ export const tmdbService = {
     query: string,
     mediaType?: MediaType,
     page = 1,
+    includeAdult?: boolean,
   ): Promise<PaginatedResponse<TMDBMediaItem>> {
     if (!query.trim()) {
       return { page: 1, results: [], totalPages: 0, totalResults: 0 };
     }
 
-    const trimmedQuery = query.trim().toLowerCase();
+    const allowAdult = includeAdult ?? (await getIncludeAdult());
 
-    // Check if query matches a genre name
+    const trimmedQuery = query.trim().toLowerCase();
+    // Genre and person expansions are one-off enrichments of the *first* page.
+    // Re-running them for every page (as an earlier version did) meant page 2
+    // returned the same extra titles as page 1, so scrolling produced
+    // duplicates and pagination effectively stalled.
+    const isFirstPage = page <= 1;
+
+    // ── Genre-name query expansion (first page only) ──
     const allGenres = { ...MOVIE_GENRES, ...TV_GENRES };
     const matchingGenreEntry = Object.entries(allGenres).find(
       ([, name]) => name.toLowerCase() === trimmedQuery
     );
 
     let genreResults: TMDBMediaItem[] = [];
-    if (matchingGenreEntry) {
+    if (matchingGenreEntry && isFirstPage) {
       const genreId = matchingGenreEntry[0];
       try {
-        if (mediaType === 'movie') {
-          const movieRes = await this.discover('movie', { genres: genreId, sortBy: 'popularity.desc' }, page);
-          genreResults = movieRes.results;
-        } else if (mediaType === 'tv') {
-          const tvRes = await this.discover('tv', { genres: genreId, sortBy: 'popularity.desc' }, page);
-          genreResults = tvRes.results;
+        if (mediaType === 'movie' || mediaType === 'tv') {
+          const res = await this.discover(mediaType, { genres: genreId, sortBy: 'popularity.desc' }, 1);
+          genreResults = res.results;
         } else {
           const [movieRes, tvRes] = await Promise.all([
-            this.discover('movie', { genres: genreId, sortBy: 'popularity.desc' }, page),
-            this.discover('tv', { genres: genreId, sortBy: 'popularity.desc' }, page),
+            this.discover('movie', { genres: genreId, sortBy: 'popularity.desc' }, 1),
+            this.discover('tv', { genres: genreId, sortBy: 'popularity.desc' }, 1),
           ]);
           const maxLen = Math.max(movieRes.results.length, tvRes.results.length);
           for (let i = 0; i < maxLen; i++) {
@@ -825,50 +880,52 @@ export const tmdbService = {
     const raw = await tmdbFetch<RawPage>(endpoint, {
       query: query.trim(),
       page,
-      include_adult: 'false',
+      include_adult: allowAdult ? 'true' : 'false',
     });
 
-    const results: TMDBMediaItem[] = [];
+    const results: TMDBMediaItem[] = [...genreResults];
 
-    // Prepend genre results
-    results.push(...genreResults);
-
-    if (raw && raw.results) {
-      // Find top person results (limit to first 2 to prevent rate limiting / massive search bloating)
-      const personResults = raw.results.filter((item: any) => item.media_type === 'person').slice(0, 2);
-
-      // Fetch combined credits for these top person results
-      const personCreditsPromises = personResults.map(async (person: any) => {
-        try {
-          const details = await this.getPersonDetails(person.id);
-          return details?.combinedCredits || [];
-        } catch (err) {
-          console.warn(`[TMDB] Failed to fetch credits for person ${person.id}:`, err);
-          return [];
-        }
-      });
-
-      const personCreditsLists = await Promise.all(personCreditsPromises);
-      const allPersonCredits = personCreditsLists.flat();
-
-      // Normalize other media results (movies and tv)
+    if (raw?.results) {
+      // Normalize the direct title matches first so they keep their ranking.
       for (const item of raw.results) {
-        if (item.media_type !== 'person') {
-          const normalized = normalizer(item);
-          if (normalized) {
-            results.push(normalized);
-          }
-        }
+        if (item.media_type === 'person') continue;
+        const normalized = normalizer(item);
+        if (normalized) results.push(normalized);
       }
 
-      // Add the person credits to the results
-      for (const credit of allPersonCredits) {
-        if (mediaType && credit.mediaType !== mediaType) continue;
-        results.push(credit);
+      // ── Person filmography expansion (first page only) ──
+      // Searching "Nolan" should surface his films, not just his person entry.
+      if (isFirstPage) {
+        const personResults = raw.results
+          .filter((item: any) => item.media_type === 'person')
+          .slice(0, 2);
+
+        const personCreditsLists = await Promise.all(
+          personResults.map(async (person: any) => {
+            try {
+              const details = await this.getPersonDetails(person.id);
+              return details?.combinedCredits ?? [];
+            } catch (err) {
+              console.warn(`[TMDB] Failed to fetch credits for person ${person.id}:`, err);
+              return [];
+            }
+          })
+        );
+
+        // Talk shows, news and reality entries dominate a person's credit list
+        // because of one-off guest appearances. Searching "Nolan" should lead
+        // with his films, not every late-night couch visit.
+        const CAMEO_GENRE_IDS = new Set([10767, 10763, 10764]);
+
+        for (const credit of personCreditsLists.flat()) {
+          if (mediaType && credit.mediaType !== mediaType) continue;
+          if ((credit.genreIds ?? []).some((g) => CAMEO_GENRE_IDS.has(g))) continue;
+          results.push(credit);
+        }
       }
     }
 
-    // Deduplicate
+    // Deduplicate by media type + id
     const seen = new Set<string>();
     const uniqueResults = results.filter((r) => {
       const key = `${r.mediaType}:${r.id}`;
@@ -878,10 +935,12 @@ export const tmdbService = {
     });
 
     return {
-      page: raw?.page ?? 1,
+      page: raw?.page ?? page,
       results: uniqueResults,
-      totalPages: Math.max(raw?.total_pages ?? 1, matchingGenreEntry ? page : 1),
-      totalResults: uniqueResults.length,
+      totalPages: raw?.total_pages ?? 1,
+      // The API's own count for the query; the expansions above are extras
+      // layered on top of page 1 and shouldn't distort the reported total.
+      totalResults: raw?.total_results ?? uniqueResults.length,
     };
   },
 
@@ -899,8 +958,11 @@ export const tmdbService = {
     const endpoint =
       mediaType === 'movie' ? '/discover/movie' : '/discover/tv';
 
+    const allowAdult = await getIncludeAdult();
+
     const params: Record<string, string | number | undefined> = {
       page,
+      include_adult: allowAdult ? 'true' : 'false',
       sort_by: filters.sortBy ?? 'popularity.desc',
       with_genres: filters.genres,
       with_original_language: filters.withOriginalLanguage ?? filters.language,
@@ -919,11 +981,11 @@ export const tmdbService = {
         : {}),
     };
 
-    const cacheKey = `discover:${mediaType}:${page}:${JSON.stringify(filters)}`;
+    // The adult flag is part of the key so flipping the setting doesn't serve
+    // results cached under the opposite value.
+    const cacheKey = `discover:${mediaType}:${page}:${allowAdult ? 'a' : 'n'}:${JSON.stringify(filters)}`;
     if (forceRefresh) {
-      try {
-        await AsyncStorage.removeItem(`${CACHE_PREFIX}${cacheKey}`);
-      } catch {}
+      await invalidateCache(cacheKey);
     }
     const raw = await tmdbFetch<RawPage>(endpoint, params, cacheKey);
     return toPaginated(

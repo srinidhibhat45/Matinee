@@ -9,7 +9,21 @@ import {
   getWatchedItemsWithDetailedRatings,
 } from './database';
 import { tmdbService } from './tmdb';
-import { MOVIE_GENRES, TV_GENRES } from '../constants/genres';
+import {
+  MOVIE_GENRES,
+  TV_GENRES,
+  getCanonicalGenres,
+  parseStoredGenres,
+} from '../constants/genres';
+
+/**
+ * Candidate identity key. TMDB numbers movies and TV independently, so
+ * `550` is both "Fight Club" and a completely unrelated series — keying
+ * anything by bare ID silently drops or swaps titles.
+ */
+function mediaKey(mediaType: string | undefined, id: number): string {
+  return `${mediaType ?? 'movie'}:${id}`;
+}
 
 class RecommendationService {
   /**
@@ -38,15 +52,13 @@ class RecommendationService {
         itemRatings.set(wItem.id, wItem.userRating ?? null);
       }
 
-      // Build genre profile based on ratings
+      // Build genre profile based on ratings.
+      // Stored genres are TMDB IDs; they are resolved to canonical tags so a
+      // movie's "Science Fiction" and a show's "Sci-Fi & Fantasy" reinforce
+      // the same preference instead of being counted as unrelated genres.
       const genreProfile = new Map<string, number>();
       for (const wItem of watchedItems) {
-        let genreNames: string[] = [];
-        try {
-          genreNames = JSON.parse(wItem.genres) || [];
-        } catch {
-          genreNames = wItem.genres ? wItem.genres.split(',').map(s => s.trim()) : [];
-        }
+        const genreTags = parseStoredGenres(wItem.genres);
 
         const r = wItem.userRating;
         let weight = 1.0; // neutral default
@@ -56,14 +68,14 @@ class RecommendationService {
           else weight = 1.0;
         }
 
-        for (const gName of genreNames) {
-          genreProfile.set(gName, (genreProfile.get(gName) || 0) + weight);
+        for (const tag of genreTags) {
+          genreProfile.set(tag, (genreProfile.get(tag) || 0) + weight);
         }
       }
 
       // Cap individual genre weight to prevent runaways
-      for (const [gName, val] of genreProfile.entries()) {
-        genreProfile.set(gName, Math.max(-10, Math.min(10, val)));
+      for (const [tag, val] of genreProfile.entries()) {
+        genreProfile.set(tag, Math.max(-10, Math.min(10, val)));
       }
 
       // Calculate scores for people (directors/actors)
@@ -135,11 +147,11 @@ class RecommendationService {
       }
       const maxLangCount = Math.max(...Array.from(langCounts.values()), 1);
 
-      // DB TMDB IDs for deduplication (excludes watched, watchlist, and not_interested items)
+      // Library keys for deduplication (excludes watched, watchlist, and not_interested items)
       const allDbItems = await getAllItems();
-      const dbTmdbIds = new Set(allDbItems.map((i) => i.tmdbId));
+      const dbKeys = new Set(allDbItems.map((i) => mediaKey(i.mediaType, i.tmdbId)));
 
-      const candidateMap = new Map<number, { item: TMDBMediaItem; sources: string[] }>();
+      const candidateMap = new Map<string, { item: TMDBMediaItem; sources: string[] }>();
 
       // --- Smart Round-Robin Seed Selection ---
       const itemsByLanguage = new Map<string, typeof watchedItems>();
@@ -276,25 +288,35 @@ class RecommendationService {
         }
       }
 
-      // Process loved people results (filmography ingestion)
+      // Process loved people results (filmography ingestion).
+      // A prolific actor can carry 300+ credits; ingesting all of them would
+      // swamp every other signal, so each person contributes only their most
+      // popular titles, and only in languages the user actually watches.
+      const MAX_CREDITS_PER_LOVED_PERSON = 20;
       for (const { person, details } of lovedPeopleResults) {
-        if (details && details.combinedCredits) {
-          for (const credit of details.combinedCredits) {
-            if (mediaType && credit.mediaType !== mediaType) continue;
-            if (dbTmdbIds.has(credit.id)) continue;
+        if (!details?.combinedCredits) continue;
 
-            const existing = candidateMap.get(credit.id);
-            const sourceTag = `loved-person-${person.id}`;
-            if (existing) {
-              if (!existing.sources.includes(sourceTag)) {
-                existing.sources.push(sourceTag);
-              }
-            } else {
-              candidateMap.set(credit.id, {
-                item: credit,
-                sources: [sourceTag],
-              });
+        let taken = 0;
+        for (const credit of details.combinedCredits) {
+          if (taken >= MAX_CREDITS_PER_LOVED_PERSON) break;
+          if (mediaType && credit.mediaType !== mediaType) continue;
+          if (!preferredLanguages.includes(credit.originalLanguage)) continue;
+
+          const key = mediaKey(credit.mediaType, credit.id);
+          if (dbKeys.has(key)) continue;
+
+          taken++;
+          const sourceTag = `loved-person-${person.id}`;
+          const existing = candidateMap.get(key);
+          if (existing) {
+            if (!existing.sources.includes(sourceTag)) {
+              existing.sources.push(sourceTag);
             }
+          } else {
+            candidateMap.set(key, {
+              item: credit,
+              sources: [sourceTag],
+            });
           }
         }
       }
@@ -308,16 +330,16 @@ class RecommendationService {
           for (const rec of rCast.value.results) {
             if (mediaType && rec.mediaType !== mediaType) continue;
             if (!preferredLanguages.includes(rec.originalLanguage)) continue;
-            if (!dbTmdbIds.has(rec.id)) {
-              const existing = candidateMap.get(rec.id);
-              if (existing) {
-                existing.sources.push(`seed-rec-${seed.tmdbId}`);
-              } else {
-                candidateMap.set(rec.id, {
-                  item: rec,
-                  sources: [`seed-rec-${seed.tmdbId}`],
-                });
-              }
+
+            const key = mediaKey(rec.mediaType, rec.id);
+            if (dbKeys.has(key)) continue;
+
+            const sourceTag = `seed-rec-${seed.tmdbId}`;
+            const existing = candidateMap.get(key);
+            if (existing) {
+              if (!existing.sources.includes(sourceTag)) existing.sources.push(sourceTag);
+            } else {
+              candidateMap.set(key, { item: rec, sources: [sourceTag] });
             }
           }
         }
@@ -326,16 +348,16 @@ class RecommendationService {
           for (const sim of sCast.value.results) {
             if (mediaType && sim.mediaType !== mediaType) continue;
             if (!preferredLanguages.includes(sim.originalLanguage)) continue;
-            if (!dbTmdbIds.has(sim.id)) {
-              const existing = candidateMap.get(sim.id);
-              if (existing) {
-                existing.sources.push(`seed-sim-${seed.tmdbId}`);
-              } else {
-                candidateMap.set(sim.id, {
-                  item: sim,
-                  sources: [`seed-sim-${seed.tmdbId}`],
-                });
-              }
+
+            const key = mediaKey(sim.mediaType, sim.id);
+            if (dbKeys.has(key)) continue;
+
+            const sourceTag = `seed-sim-${seed.tmdbId}`;
+            const existing = candidateMap.get(key);
+            if (existing) {
+              if (!existing.sources.includes(sourceTag)) existing.sources.push(sourceTag);
+            } else {
+              candidateMap.set(key, { item: sim, sources: [sourceTag] });
             }
           }
         }
@@ -348,18 +370,17 @@ class RecommendationService {
           for (const item of discoverRes.results) {
             if (mediaType && item.mediaType !== mediaType) continue;
             if (!preferredLanguages.includes(item.originalLanguage)) continue;
-            if (!dbTmdbIds.has(item.id)) {
-              const existing = candidateMap.get(item.id);
-              if (existing) {
-                if (!existing.sources.includes(`popular-${lang}`)) {
-                  existing.sources.push(`popular-${lang}`);
-                }
-              } else {
-                candidateMap.set(item.id, {
-                  item: { ...item, mediaType: type },
-                  sources: [`popular-${lang}`],
-                });
-              }
+
+            const resolved = { ...item, mediaType: type };
+            const key = mediaKey(resolved.mediaType, resolved.id);
+            if (dbKeys.has(key)) continue;
+
+            const sourceTag = `popular-${lang}`;
+            const existing = candidateMap.get(key);
+            if (existing) {
+              if (!existing.sources.includes(sourceTag)) existing.sources.push(sourceTag);
+            } else {
+              candidateMap.set(key, { item: resolved, sources: [sourceTag] });
             }
           }
         }
@@ -370,44 +391,20 @@ class RecommendationService {
         for (const item of trendingResult.results) {
           if (mediaType && item.mediaType !== mediaType) continue;
           if (!preferredLanguages.includes(item.originalLanguage)) continue;
-          if (!dbTmdbIds.has(item.id)) {
-            const existing = candidateMap.get(item.id);
-            if (existing) {
-              if (!existing.sources.includes('trending')) {
-                existing.sources.push('trending');
-              }
-            } else {
-              candidateMap.set(item.id, {
-                item,
-                sources: ['trending'],
-              });
-            }
+
+          const key = mediaKey(item.mediaType, item.id);
+          if (dbKeys.has(key)) continue;
+
+          const existing = candidateMap.get(key);
+          if (existing) {
+            if (!existing.sources.includes('trending')) existing.sources.push('trending');
+          } else {
+            candidateMap.set(key, { item, sources: ['trending'] });
           }
         }
       }
 
       console.log(`[Personalized Recs] Candidate pool size: ${candidateMap.size}`);
-
-      const geminiKey = await getPreference('PREF_GEMINI_API_KEY');
-      if (geminiKey) {
-        try {
-          const candidatesList = Array.from(candidateMap.values()).map((v) => v.item);
-          const watchedDetailed = await getWatchedItemsWithDetailedRatings();
-          
-          // Take top 15 and bottom 10 rated watched items for context efficiency
-          const highRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) >= 7).slice(0, 15);
-          const lowRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) <= 5).slice(0, 10);
-          const userProfileSeed = [...highRated, ...lowRated];
-          
-          const aiRecs = await this.getAiRecommendations(geminiKey, userProfileSeed, candidatesList, limit);
-          if (aiRecs && aiRecs.length > 0) {
-            console.log(`[Personalized Recs] Gemini AI recommendations generated successfully: ${aiRecs.length} items`);
-            return aiRecs;
-          }
-        } catch (aiErr) {
-          console.warn('[Recommendation Engine] AI recommendations call failed, falling back to heuristics:', aiErr);
-        }
-      }
 
       // Score each candidate
       const scored: RecommendedItem[] = [];
@@ -418,24 +415,23 @@ class RecommendationService {
 
         // 1. Genre score (Up to 45 points, negative weights allowed)
         const itemGenres = item.genreIds || [];
-        let genreScoreVal = 0;
+        const itemGenreTags = new Set<string>();
         for (const gid of itemGenres) {
-          const genreName = MOVIE_GENRES[gid] || TV_GENRES[gid] || '';
-          const weight = genreProfile.get(genreName) || 0;
-          genreScoreVal += weight;
+          for (const tag of getCanonicalGenres(gid)) itemGenreTags.add(tag);
+        }
+
+        let genreScoreVal = 0;
+        for (const tag of itemGenreTags) {
+          genreScoreVal += genreProfile.get(tag) || 0;
         }
         genreScoreVal = Math.max(-30, Math.min(45, genreScoreVal));
         score += genreScoreVal;
 
         if (genreScoreVal > 10) {
-          const sortedGenres = [...itemGenres].sort((a, b) => {
-            const aName = MOVIE_GENRES[a] || TV_GENRES[a] || '';
-            const bName = MOVIE_GENRES[b] || TV_GENRES[b] || '';
-            return (genreProfile.get(bName) || 0) - (genreProfile.get(aName) || 0);
-          });
-          const topGenreId = sortedGenres[0];
-          const genreName = MOVIE_GENRES[topGenreId] || TV_GENRES[topGenreId] || '';
-          if (genreName) reasons.push(`You enjoy ${genreName}`);
+          const bestTag = Array.from(itemGenreTags).sort(
+            (a, b) => (genreProfile.get(b) || 0) - (genreProfile.get(a) || 0)
+          )[0];
+          if (bestTag) reasons.push(`You enjoy ${bestTag}`);
         }
 
         // 2. Multi-source bonus (0-15)
@@ -460,11 +456,16 @@ class RecommendationService {
         const langCount = langCounts.get(item.originalLanguage) || 0;
         score += (langCount / maxLangCount) * 15;
 
-        // 7. Recency score (0-10)
+        // 7. Recency score (0-10).
+        // Decays gently so an acclaimed older title still competes, and
+        // unreleased titles don't outrank everything by scoring above 10.
         if (item.releaseDate) {
           const releaseYear = new Date(item.releaseDate).getFullYear();
-          const currentYear = new Date().getFullYear();
-          score += Math.max(0, 10 - (currentYear - releaseYear));
+          if (Number.isFinite(releaseYear)) {
+            const currentYear = new Date().getFullYear();
+            const age = Math.max(0, currentYear - releaseYear);
+            score += Math.max(0, 10 - age * 0.4);
+          }
         }
 
         // 8. Loved director/actor boost (+25 points)
@@ -472,20 +473,26 @@ class RecommendationService {
         if (hasLovedPerson) {
           score += 25;
           const lpSource = sources.find(s => s.startsWith('loved-person-'));
-          const pId = lpSource ? parseInt(lpSource.split('-')[2], 10) : 0;
+          // Source tag is `loved-person-<id>`; the id is everything after the
+          // final dash so it survives any future prefix changes.
+          const pId = lpSource ? Number(lpSource.slice(lpSource.lastIndexOf('-') + 1)) : 0;
           const pInfo = peopleScores.get(pId);
           if (pInfo) {
             reasons.push(pInfo.role === 'director' ? `Directed by ${pInfo.name}` : `Starring ${pInfo.name}`);
           }
         }
 
-        // 9. Disliked director/actor penalty (-40 points)
-        if (dislikedMediaSet.has(`${item.mediaType}:${item.id}`)) {
-          score -= 40;
+        // 9. Disliked director/actor penalty.
+        // Must outweigh the strongest positive signals, otherwise a
+        // well-reviewed title from a disliked actor still surfaces.
+        if (dislikedMediaSet.has(mediaKey(item.mediaType, item.id))) {
+          score -= 60;
         }
 
-        // 10. Diversity bonus (0-5)
-        score += Math.random() * 5;
+        // 10. Stable jitter (0-5) to keep the feed from looking frozen without
+        // reshuffling it on every single refresh. Derived from the item id so
+        // the same inputs always produce the same ordering.
+        score += ((item.id * 2654435761) % 1000) / 200;
 
         if (reasons.length === 0) {
           if (sources.includes('trending')) {
@@ -504,6 +511,55 @@ class RecommendationService {
           score: Math.round(score * 10) / 10,
           reason: reasons[0],
         });
+      }
+
+      // --- Optional AI re-ranking ---
+      // Gemini is used as a re-ranker over the strongest heuristic candidates
+      // rather than as a replacement pipeline. Handing it the raw candidate
+      // pool would mean ranking an arbitrary slice of hundreds of titles, and
+      // returning its output directly would skip language balancing and the
+      // franchise/genre diversity rules below.
+      const geminiKey = await getPreference('PREF_GEMINI_API_KEY');
+      if (geminiKey && scored.length > 0) {
+        try {
+          const AI_RERANK_POOL = 60;
+          const topForAi = [...scored]
+            .sort((a, b) => b.score - a.score)
+            .slice(0, AI_RERANK_POOL);
+
+          const watchedDetailed = await getWatchedItemsWithDetailedRatings();
+          // Top 15 and bottom 10 rated watched items for context efficiency
+          const highRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) >= 7).slice(0, 15);
+          const lowRated = watchedDetailed.filter((w) => (w.overall_rating ?? 0) <= 5).slice(0, 10);
+          const userProfileSeed = [...highRated, ...lowRated];
+
+          const aiRecs = await this.getAiRecommendations(
+            geminiKey,
+            userProfileSeed,
+            topForAi,
+            AI_RERANK_POOL
+          );
+
+          if (aiRecs && aiRecs.length > 0) {
+            // Blend: the AI judgement dominates, but the heuristic score still
+            // contributes so a hallucinated ranking can't fully invert the feed.
+            const maxHeuristic = Math.max(...scored.map((s) => s.score), 1);
+            const aiByKey = new Map(
+              aiRecs.map((r) => [mediaKey(r.mediaType, r.id), r])
+            );
+
+            for (const cand of scored) {
+              const ai = aiByKey.get(mediaKey(cand.mediaType, cand.id));
+              if (!ai) continue;
+              const normalisedHeuristic = (cand.score / maxHeuristic) * 100;
+              cand.score = ai.score * 0.65 + normalisedHeuristic * 0.35;
+              if (ai.reason) cand.reason = ai.reason;
+            }
+            console.log(`[Personalized Recs] Gemini re-ranked ${aiRecs.length} candidates`);
+          }
+        } catch (aiErr) {
+          console.warn('[Recommendation Engine] AI re-ranking failed, using heuristics:', aiErr);
+        }
       }
 
       // --- Proportional Language Interleaving (Multiplexer) ---
@@ -538,20 +594,33 @@ class RecommendationService {
         }
       }
 
-      const minFloor = Math.max(5, Math.floor(limit * 0.15)); // 9 slots for 60
+      // --- Slot budgeting ---
+      // The floor guarantees regional languages a presence, but it is a share
+      // of the feed split across the represented languages — not a flat per
+      // language quota. A flat quota (the previous behaviour) overspent the
+      // budget as soon as more than a handful of languages were selected,
+      // which starved the languages the user actually watches most.
+      const representedPreferred = settingsLanguages.filter((lang) =>
+        candidatesByLang.has(lang)
+      );
+
+      // Reserve at most 40% of the feed for floor guarantees so the
+      // proportional pass still reflects real watch habits.
+      const floorBudget = Math.floor(limit * 0.4);
+      const perLanguageFloor = representedPreferred.length > 0
+        ? Math.max(1, Math.floor(floorBudget / representedPreferred.length))
+        : 0;
+
       let remainingLimit = limit;
 
-      // First, assign floor slots to preferred languages
-      for (const lang of settingsLanguages) {
-        if (candidatesByLang.has(lang)) {
-          const available = candidatesByLang.get(lang)!.length;
-          const floorSlots = Math.min(minFloor, available);
-          targetSlotsMap.set(lang, floorSlots);
-          remainingLimit -= floorSlots;
-        }
+      for (const lang of representedPreferred) {
+        const available = candidatesByLang.get(lang)!.length;
+        const floorSlots = Math.min(perLanguageFloor, available, remainingLimit);
+        targetSlotsMap.set(lang, floorSlots);
+        remainingLimit -= floorSlots;
       }
 
-      // Distribute remaining slots proportionally
+      // Distribute remaining slots proportionally to affinity weight
       if (remainingLimit > 0 && totalWeight > 0) {
         for (const lang of langWeights.keys()) {
           const weight = langWeights.get(lang) || 0;
@@ -559,6 +628,12 @@ class RecommendationService {
           const current = targetSlotsMap.get(lang) || 0;
           targetSlotsMap.set(lang, current + proportional);
         }
+      }
+
+      // Any language with candidates but no target would be unreachable in the
+      // ratio pass below; give it a single slot so the filler stage can use it.
+      for (const lang of candidatesByLang.keys()) {
+        if (!targetSlotsMap.has(lang)) targetSlotsMap.set(lang, 1);
       }
 
       const FRANCHISE_KEYWORDS = [
@@ -577,14 +652,76 @@ class RecommendationService {
 
       const finalRecs: RecommendedItem[] = [];
       const currentCounts = new Map<string, number>();
-      const pointers = new Map<string, number>();
       const franchiseCounts = new Map<string, number>();
-      const genreCounts = new Map<number, number>();
+      const genreCounts = new Map<string, number>();
 
+      // Candidates are consumed by removal, so the head of each language list
+      // is always the next one available.
       for (const lang of candidatesByLang.keys()) {
         currentCounts.set(lang, 0);
-        pointers.set(lang, 0);
       }
+
+      /**
+       * Score a candidate as it would appear *right now*, penalising franchises
+       * and genres that already crowd the feed. Applied on every pick so the
+       * diversity rules hold for quota picks as well as filler picks.
+       */
+      const effectiveScoreOf = (cand: RecommendedItem): number => {
+        let penalty = 0;
+
+        const fk = getFranchiseKey(cand.title, cand.overview || '');
+        if (fk && (franchiseCounts.get(fk) || 0) >= 2) penalty += 25;
+
+        for (const gid of cand.genreIds || []) {
+          for (const tag of getCanonicalGenres(gid)) {
+            penalty += (genreCounts.get(tag) || 0) * 0.5;
+          }
+        }
+
+        return cand.score - penalty;
+      };
+
+      const recordPick = (cand: RecommendedItem) => {
+        const fk = getFranchiseKey(cand.title, cand.overview || '');
+        if (fk) franchiseCounts.set(fk, (franchiseCounts.get(fk) || 0) + 1);
+        for (const gid of cand.genreIds || []) {
+          for (const tag of getCanonicalGenres(gid)) {
+            genreCounts.set(tag, (genreCounts.get(tag) || 0) + 1);
+          }
+        }
+      };
+
+      /**
+       * Pick the best remaining candidate within a language, looking a short
+       * way past the pointer so a franchise-capped title doesn't block the
+       * whole language. Returns the chosen index, or -1 when exhausted.
+       */
+      const LOOKAHEAD = 8;
+      const pickWithinLang = (lang: string): number => {
+        const candidates = candidatesByLang.get(lang)!;
+        if (candidates.length === 0) return -1;
+
+        let bestIdx = -1;
+        let bestScore = -Infinity;
+        const end = Math.min(candidates.length, LOOKAHEAD);
+        for (let i = 0; i < end; i++) {
+          const s = effectiveScoreOf(candidates[i]);
+          if (s > bestScore) {
+            bestScore = s;
+            bestIdx = i;
+          }
+        }
+        return bestIdx;
+      };
+
+      /** Consume `index` from a language, keeping the pointer monotonic. */
+      const consume = (lang: string, index: number) => {
+        const candidates = candidatesByLang.get(lang)!;
+        const [picked] = candidates.splice(index, 1);
+        finalRecs.push(picked);
+        recordPick(picked);
+        return picked;
+      };
 
       while (finalRecs.length < limit) {
         let bestLang: string | null = null;
@@ -592,8 +729,7 @@ class RecommendationService {
 
         // Choose the next language to pull from based on the most under-represented ratio
         for (const [lang, candidates] of candidatesByLang.entries()) {
-          const ptr = pointers.get(lang) || 0;
-          if (ptr >= candidates.length) continue;
+          if (candidates.length === 0) continue;
 
           const target = targetSlotsMap.get(lang) || 0;
           if (target === 0) continue;
@@ -608,69 +744,37 @@ class RecommendationService {
           }
         }
 
-        if (!bestLang) {
-          // Fallback filler: pull from any remaining candidates with the highest effective score
-          let bestCandidate: RecommendedItem | null = null;
-          let bestCandidateEffectiveScore = -Infinity;
-          let bestCandidateLang = '';
-
-          for (const [lang, candidates] of candidatesByLang.entries()) {
-            const ptr = pointers.get(lang) || 0;
-            if (ptr < candidates.length) {
-              const cand = candidates[ptr];
-              
-              let franchisePenalty = 0;
-              const fk = getFranchiseKey(cand.title, cand.overview || '');
-              if (fk && (franchiseCounts.get(fk) || 0) >= 2) {
-                franchisePenalty = 25;
-              }
-
-              let genreCountPenalty = 0;
-              for (const gid of cand.genreIds || []) {
-                genreCountPenalty += (genreCounts.get(gid) || 0) * 0.5;
-              }
-
-              const effectiveScore = cand.score - franchisePenalty - genreCountPenalty;
-              if (effectiveScore > bestCandidateEffectiveScore) {
-                bestCandidateEffectiveScore = effectiveScore;
-                bestCandidate = cand;
-                bestCandidateLang = lang;
-              }
-            }
+        if (bestLang) {
+          const idx = pickWithinLang(bestLang);
+          if (idx < 0) {
+            // Language is exhausted; retarget it so the loop can't spin.
+            targetSlotsMap.set(bestLang, 0);
+            continue;
           }
-
-          if (bestCandidate && bestCandidateLang) {
-            finalRecs.push(bestCandidate);
-            const ptr = pointers.get(bestCandidateLang) || 0;
-            pointers.set(bestCandidateLang, ptr + 1);
-
-            const fk = getFranchiseKey(bestCandidate.title, bestCandidate.overview || '');
-            if (fk) {
-              franchiseCounts.set(fk, (franchiseCounts.get(fk) || 0) + 1);
-            }
-            for (const gid of bestCandidate.genreIds || []) {
-              genreCounts.set(gid, (genreCounts.get(gid) || 0) + 1);
-            }
-          } else {
-            break;
-          }
-        } else {
-          // Pull from bestLang group
-          const ptr = pointers.get(bestLang) || 0;
-          const cand = candidatesByLang.get(bestLang)![ptr];
-
-          finalRecs.push(cand);
-          pointers.set(bestLang, ptr + 1);
+          consume(bestLang, idx);
           currentCounts.set(bestLang, (currentCounts.get(bestLang) || 0) + 1);
+          continue;
+        }
 
-          const fk = getFranchiseKey(cand.title, cand.overview || '');
-          if (fk) {
-            franchiseCounts.set(fk, (franchiseCounts.get(fk) || 0) + 1);
-          }
-          for (const gid of cand.genreIds || []) {
-            genreCounts.set(gid, (genreCounts.get(gid) || 0) + 1);
+        // Fallback filler: every quota is met, so take the globally best
+        // remaining candidate regardless of language.
+        let fillerLang: string | null = null;
+        let fillerIdx = -1;
+        let fillerScore = -Infinity;
+
+        for (const lang of candidatesByLang.keys()) {
+          const idx = pickWithinLang(lang);
+          if (idx < 0) continue;
+          const s = effectiveScoreOf(candidatesByLang.get(lang)![idx]);
+          if (s > fillerScore) {
+            fillerScore = s;
+            fillerLang = lang;
+            fillerIdx = idx;
           }
         }
+
+        if (!fillerLang || fillerIdx < 0) break;
+        consume(fillerLang, fillerIdx);
       }
 
       console.log(`[Personalized Recs] Generated ${finalRecs.length} recommendations. Languages present: ${Array.from(new Set(finalRecs.map(r => r.originalLanguage))).join(', ')}`);
@@ -691,13 +795,21 @@ class RecommendationService {
         ? langPref.split(',')
         : ['en', 'hi', 'kn', 'ta', 'te', 'ko', 'ja'];
 
+      // Even a brand-new user may have a couple of logged or dismissed titles;
+      // never recommend something already in their library.
+      const libraryKeys = new Set(
+        (await getAllItems()).map((i) => mediaKey(i.mediaType, i.tmdbId))
+      );
+
       const trending = await tmdbService.getTrending(mediaType || 'all', 'week');
-      const candidates = new Map<number, TMDBMediaItem>();
+      const candidates = new Map<string, TMDBMediaItem>();
 
       for (const item of trending?.results || []) {
         if (mediaType && item.mediaType !== mediaType) continue;
         if (preferredLanguages.includes(item.originalLanguage)) {
-          candidates.set(item.id, item);
+          const key = mediaKey(item.mediaType, item.id);
+          if (libraryKeys.has(key)) continue;
+          candidates.set(key, item);
         }
       }
 
@@ -728,8 +840,11 @@ class RecommendationService {
           for (const item of discoverRes.results) {
             if (mediaType && item.mediaType !== mediaType) continue;
             if (preferredLanguages.includes(item.originalLanguage)) {
-              if (!candidates.has(item.id)) {
-                candidates.set(item.id, { ...item, mediaType: type });
+              const resolved = { ...item, mediaType: type };
+              const key = mediaKey(resolved.mediaType, resolved.id);
+              if (libraryKeys.has(key)) continue;
+              if (!candidates.has(key)) {
+                candidates.set(key, resolved);
               }
             }
           }
@@ -749,25 +864,35 @@ class RecommendationService {
         list.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
       }
 
+      // Split the floor across the languages that actually returned results,
+      // rather than granting each one a flat quota that overspends the feed.
       const targetSlotsMap = new Map<string, number>();
-      const minFloor = Math.max(5, Math.floor(limit * 0.15));
+      const represented = preferredLanguages.filter((l) => candidatesByLang.has(l));
+      const floorBudget = Math.floor(limit * 0.4);
+      const perLanguageFloor = represented.length > 0
+        ? Math.max(1, Math.floor(floorBudget / represented.length))
+        : 0;
       let remainingLimit = limit;
 
-      for (const lang of preferredLanguages) {
-        if (candidatesByLang.has(lang)) {
-          const available = candidatesByLang.get(lang)!.length;
-          const floorSlots = Math.min(minFloor, available);
-          targetSlotsMap.set(lang, floorSlots);
-          remainingLimit -= floorSlots;
-        }
+      for (const lang of represented) {
+        const available = candidatesByLang.get(lang)!.length;
+        const floorSlots = Math.min(perLanguageFloor, available, remainingLimit);
+        targetSlotsMap.set(lang, floorSlots);
+        remainingLimit -= floorSlots;
       }
 
-      if (remainingLimit > 0 && preferredLanguages.length > 0) {
-        const share = Math.round(remainingLimit / preferredLanguages.length);
-        for (const lang of preferredLanguages) {
+      if (remainingLimit > 0 && represented.length > 0) {
+        const share = Math.max(1, Math.round(remainingLimit / represented.length));
+        for (const lang of represented) {
           const current = targetSlotsMap.get(lang) || 0;
           targetSlotsMap.set(lang, current + share);
         }
+      }
+
+      // Languages outside the preference list still hold candidates; give them
+      // a slot so the filler stage can reach them.
+      for (const lang of candidatesByLang.keys()) {
+        if (!targetSlotsMap.has(lang)) targetSlotsMap.set(lang, 1);
       }
 
       const finalRecs: RecommendedItem[] = [];
@@ -881,13 +1006,16 @@ class RecommendationService {
         review: w.review_text ?? ''
       }));
 
-      // 2. Build candidates list (limit to 50 candidates to avoid token blowup)
-      const candidateList = candidates.slice(0, 50).map((c) => ({
+      // 2. Build candidates list. Overviews are truncated because a full pool
+      // of them dominates the prompt without adding ranking signal.
+      const candidateList = candidates.slice(0, limit).map((c) => ({
         tmdbId: c.id,
         title: c.title,
         mediaType: c.mediaType,
-        genres: c.genreIds.map((id) => MOVIE_GENRES[id] || TV_GENRES[id] || '').filter(Boolean),
-        overview: c.overview ?? ''
+        genres: c.genreIds
+          .map((id) => MOVIE_GENRES[id] || TV_GENRES[id] || '')
+          .filter(Boolean),
+        overview: (c.overview ?? '').slice(0, 300),
       }));
 
       if (candidateList.length === 0) return [];
@@ -952,10 +1080,11 @@ ${JSON.stringify(candidateList, null, 2)}
                           type: 'OBJECT',
                           properties: {
                             tmdbId: { type: 'INTEGER' },
+                            mediaType: { type: 'STRING' },
                             score: { type: 'NUMBER' },
                             reason: { type: 'STRING' }
                           },
-                          required: ['tmdbId', 'score', 'reason']
+                          required: ['tmdbId', 'mediaType', 'score', 'reason']
                         }
                       }
                     },
@@ -1004,20 +1133,38 @@ ${JSON.stringify(candidateList, null, 2)}
       }
 
       const result = JSON.parse(text);
-      const recsList: { tmdbId: number; score: number; reason: string }[] = result.recommendations ?? [];
+      const recsList: {
+        tmdbId: number;
+        mediaType?: string;
+        score: number;
+        reason: string;
+      }[] = result.recommendations ?? [];
 
-      // Map back to TMDBMediaItem
-      const candidatesMap = new Map(candidates.map((c) => [c.id, c]));
+      // Map back to the original candidates. Keyed by media type as well as id
+      // because a movie and a series can share a TMDB id.
+      const candidatesMap = new Map(
+        candidates.map((c) => [mediaKey(c.mediaType, c.id), c])
+      );
       const finalRecs: RecommendedItem[] = [];
+      const seen = new Set<string>();
 
       for (const rec of recsList) {
-        const item = candidatesMap.get(rec.tmdbId);
-        if (item) {
+        // Fall back to trying both media types if the model omitted or
+        // mislabelled it, so a good ranking isn't discarded over a typo.
+        const keys = rec.mediaType
+          ? [mediaKey(rec.mediaType, rec.tmdbId)]
+          : [mediaKey('movie', rec.tmdbId), mediaKey('tv', rec.tmdbId)];
+
+        for (const key of keys) {
+          const item = candidatesMap.get(key);
+          if (!item || seen.has(key)) continue;
+          seen.add(key);
           finalRecs.push({
             ...item,
-            score: Math.round(rec.score * 10) / 10,
-            reason: rec.reason
+            score: Math.max(0, Math.min(100, Number(rec.score) || 0)),
+            reason: rec.reason,
           });
+          break;
         }
       }
 
@@ -1054,12 +1201,9 @@ ${JSON.stringify(candidateList, null, 2)}
     // Personalization Metrics: Genre affinity
     const genreScore: Record<string, number> = {};
     for (const w of watchedDetailed) {
-      let gNames: string[] = [];
-      try {
-        gNames = JSON.parse(w.genres) || [];
-      } catch {
-        gNames = w.genres ? w.genres.split(',').map((s: string) => s.trim()) : [];
-      }
+      // Stored genres are TMDB IDs — resolve them to readable names so the
+      // model receives "Thriller", not "53".
+      const gNames = parseStoredGenres(w.genres);
       const rating = w.overall_rating ?? 6;
       const weight = rating >= 7 ? 2 : rating <= 4 ? -3 : 0;
       for (const g of gNames) {
@@ -1359,12 +1503,8 @@ ${JSON.stringify(historyContext, null, 2)}
 
       const genreScore: Record<string, number> = {};
       for (const w of watchedDetailed) {
-        let gNames: string[] = [];
-        try {
-          gNames = JSON.parse(w.genres) || [];
-        } catch {
-          gNames = w.genres ? w.genres.split(',').map((s: string) => s.trim()) : [];
-        }
+        // Stored genres are TMDB IDs — resolve them to readable names.
+        const gNames = parseStoredGenres(w.genres);
         const rating = w.overall_rating ?? 6;
         const weight = rating >= 7 ? 2 : rating <= 4 ? -3 : 0;
         for (const g of gNames) {

@@ -3,16 +3,28 @@ import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { getImageUrl } from './tmdb';
 
+/**
+ * Scheduled-notification identifier. TMDB ids repeat across media types, so
+ * without the type a series reminder could cancel a film's, or overwrite it.
+ */
+function reminderKey(tmdbId: number, mediaType: 'movie' | 'tv'): string {
+  return `${mediaType}-${tmdbId}`;
+}
+
 class NotificationService {
   private initialized = false;
 
-  private async downloadPosterLocally(posterPath: string | null | undefined, tmdbId: number): Promise<string | null> {
+  private async downloadPosterLocally(
+    posterPath: string | null | undefined,
+    tmdbId: number,
+    mediaType: 'movie' | 'tv'
+  ): Promise<string | null> {
     if (!posterPath) return null;
     const remoteUrl = getImageUrl(posterPath, 'w500');
     if (!remoteUrl) return null;
 
     try {
-      const filename = `${tmdbId}_poster.jpg`;
+      const filename = `${reminderKey(tmdbId, mediaType)}_poster.jpg`;
       const localUri = `${FileSystem.cacheDirectory}${filename}`;
       
       const fileInfo = await FileSystem.getInfoAsync(localUri);
@@ -96,10 +108,15 @@ class NotificationService {
       await this.initialize();
 
       const release = new Date(releaseDate);
+      if (isNaN(release.getTime())) {
+        console.warn(`[Notifications] Skipping reminder for "${title}" — invalid release date:`, releaseDate);
+        return;
+      }
       const now = new Date();
+      const key = reminderKey(tmdbId, mediaType);
 
       // Download the poster locally if available
-      const localPosterUri = await this.downloadPosterLocally(posterPath, tmdbId);
+      const localPosterUri = await this.downloadPosterLocally(posterPath, tmdbId, mediaType);
 
       // Day before reminder (9 AM)
       const dayBefore = new Date(release);
@@ -116,7 +133,7 @@ class NotificationService {
             attachments: localPosterUri
               ? [
                   {
-                    identifier: `${tmdbId}-day-before-poster`,
+                    identifier: `${key}-day-before-poster`,
                     url: localPosterUri,
                     type: 'image/jpeg',
                   },
@@ -128,7 +145,7 @@ class NotificationService {
             date: dayBefore,
             channelId: 'movie-releases',
           },
-          identifier: `${tmdbId}-day-before`,
+          identifier: `${key}-day-before`,
         });
       }
 
@@ -146,7 +163,7 @@ class NotificationService {
             attachments: localPosterUri
               ? [
                   {
-                    identifier: `${tmdbId}-release-day-poster`,
+                    identifier: `${key}-release-day-poster`,
                     url: localPosterUri,
                     type: 'image/jpeg',
                   },
@@ -158,7 +175,7 @@ class NotificationService {
             date: releaseDay,
             channelId: 'movie-releases',
           },
-          identifier: `${tmdbId}-release-day`,
+          identifier: `${key}-release-day`,
         });
       }
     } catch (error) {
@@ -166,9 +183,14 @@ class NotificationService {
     }
   }
 
-  async cancelReminder(tmdbId: number): Promise<void> {
+  async cancelReminder(tmdbId: number, mediaType: 'movie' | 'tv' = 'movie'): Promise<void> {
     if (Platform.OS === 'web') return;
     try {
+      const key = reminderKey(tmdbId, mediaType);
+      await Notifications.cancelScheduledNotificationAsync(`${key}-day-before`);
+      await Notifications.cancelScheduledNotificationAsync(`${key}-release-day`);
+      // Also clear identifiers written before reminders were scoped by media
+      // type, so upgrading users don't keep receiving stale reminders.
       await Notifications.cancelScheduledNotificationAsync(`${tmdbId}-day-before`);
       await Notifications.cancelScheduledNotificationAsync(`${tmdbId}-release-day`);
     } catch (error) {

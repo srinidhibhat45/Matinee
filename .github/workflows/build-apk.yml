@@ -1,5 +1,8 @@
 name: Build Android APK
 
+# A full APK rebuild is only needed when something native changes, or when
+# cutting a tagged release. Pure JS/asset pushes ship over-the-air through
+# .github/workflows/ota-update.yml instead of burning an EAS build.
 on:
   push:
     branches:
@@ -9,8 +12,42 @@ on:
   workflow_dispatch:
 
 jobs:
+  guard:
+    name: Decide whether a rebuild is needed
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.detect.outputs.should_build }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect native-affecting changes
+        id: detect
+        run: |
+          # Tagged releases and manual runs always build.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          if echo "$CHANGED" | grep -qE '^(android|ios)/|^package(-lock)?\.json$|^(app\.json|app\.config\.[jt]s|eas\.json)$'; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Native-affecting files changed — running a full APK build."
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::JS-only change — skipping the APK build; the OTA workflow handles this push."
+          fi
+
   build:
     name: Build and Release APK
+    needs: guard
+    if: needs.guard.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
