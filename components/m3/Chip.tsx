@@ -195,8 +195,9 @@ export function SegmentedButtons<T extends string>({
               accessibilityRole="radio"
               accessibilityLabel={option.a11yLabel ?? option.label}
               accessibilityState={{ selected: isSelected, checked: isSelected }}
-              // Dense segments render 36dp tall; pad the target back to 48dp.
-              hitSlop={dense ? { top: 6, bottom: 6 } : undefined}
+              // Segments render 36dp (dense) or 40dp tall; either way the
+              // target is padded back out to the 48dp minimum.
+              hitSlop={dense ? { top: 6, bottom: 6 } : { top: 4, bottom: 4 }}
               style={[
                 segmented.segment,
                 {

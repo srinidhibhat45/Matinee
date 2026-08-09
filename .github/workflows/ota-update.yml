@@ -34,6 +34,9 @@ jobs:
 
       - name: Detect native-affecting changes
         id: detect
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
         run: |
           # A manual dispatch always publishes — the operator is asserting
           # the installed binaries are compatible.
@@ -42,7 +45,7 @@ jobs:
             exit 0
           fi
 
-          CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
+          CHANGED=$(git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
           echo "Changed files:"
           echo "$CHANGED"
 
@@ -87,11 +90,26 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      # Both values arrive as environment variables rather than being
+      # interpolated into the script body. `${{ }}` is substituted as raw text
+      # *before* bash parses the line, so a commit message containing a
+      # backtick, quote or `$(...)` would otherwise be executed as a command —
+      # on a runner that has EXPO_TOKEN in its environment.
       - name: Publish update
+        env:
+          BRANCH_INPUT: ${{ github.event.inputs.branch }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          BRANCH="${{ github.event.inputs.branch || 'preview' }}"
+          BRANCH="${BRANCH_INPUT:-preview}"
+
+          # EAS caps the update message, and only the subject line is useful
+          # here anyway — the full body is a git log away.
+          MESSAGE=$(printf '%s' "${COMMIT_MESSAGE:-Manual OTA publish}" | head -n 1 | cut -c1-180)
+          [ -n "$MESSAGE" ] || MESSAGE="Manual OTA publish"
+
           echo "Publishing OTA update to branch: $BRANCH"
+          echo "Message: $MESSAGE"
           npx eas-cli update \
             --branch "$BRANCH" \
-            --message "${{ github.event.head_commit.message || 'Manual OTA publish' }}" \
+            --message "$MESSAGE" \
             --non-interactive
