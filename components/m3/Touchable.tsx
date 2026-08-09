@@ -74,18 +74,13 @@ export default function Touchable({
       android_ripple={androidRipple}
       disabled={disabled}
       {...ariaProps}
-      style={({ pressed }) => [
-        style,
-        // Android already draws the ripple; adding an overlay would double it.
-        pressed && showStateLayer && !disabled && Platform.OS !== 'android'
-          ? { opacity: 0.88 }
-          : null,
-      ]}
+      style={style}
       {...rest}
     >
       {({ pressed }: any) => (
         <>
           {typeof children === 'function' ? (children as any)({ pressed }) : children}
+          {/* Android already draws the ripple, so the overlay would double it. */}
           {pressed && showStateLayer && !disabled && Platform.OS !== 'android' ? (
             <View
               pointerEvents="none"
