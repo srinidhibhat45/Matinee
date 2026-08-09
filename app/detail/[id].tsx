@@ -150,6 +150,12 @@ function StarRow({
         now: current,
         text: current > 0 ? `${current} out of 10` : 'Not rated',
       }}
+      // React Native Web ignores `accessibilityValue`, so the ARIA equivalents
+      // are set alongside it. Native reads the former, the browser the latter.
+      aria-valuemin={0}
+      aria-valuemax={10}
+      aria-valuenow={current}
+      aria-valuetext={current > 0 ? `${current} out of 10` : 'Not rated'}
       accessibilityHint="Swipe up or down to change the rating"
       onAccessibilityAction={(event) => {
         if (event.nativeEvent.actionName === 'increment') adjust(1);
@@ -1867,6 +1873,10 @@ export default function DetailScreen() {
                       now: episodeRatingInput,
                       text: `${episodeRatingInput.toFixed(1)} out of 10`,
                     }}
+                    aria-valuemin={1}
+                    aria-valuemax={10}
+                    aria-valuenow={episodeRatingInput}
+                    aria-valuetext={`${episodeRatingInput.toFixed(1)} out of 10`}
                     accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
                     onAccessibilityAction={(event) => {
                       if (event.nativeEvent.actionName === 'increment') {
