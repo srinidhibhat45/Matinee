@@ -100,7 +100,8 @@ export default function Chip({
             borderRadius={shape.full}
             accessibilityRole="button"
             accessibilityLabel={`Remove ${label}`}
-            hitSlop={12}
+            // 20dp icon: 14dp each side brings the target to the 48dp minimum.
+            hitSlop={14}
             style={styles.remove}
           >
             <Ionicons name="close" size={16} color={content} />

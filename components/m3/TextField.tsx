@@ -125,7 +125,8 @@ export default function TextField({
               borderRadius={shape.full}
               accessibilityRole="button"
               accessibilityLabel={trailingIconLabel ?? 'Field action'}
-              hitSlop={12}
+              // 20dp icon: 14dp each side brings the target to the 48dp minimum.
+              hitSlop={14}
             >
               <Ionicons name={trailingIcon} size={20} color={colors.onSurfaceVariant} />
             </Touchable>
