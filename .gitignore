@@ -45,3 +45,5 @@ yarn-error.*
 .npm-cache/
 *.apk
 
+# Claude Code local state (launch config and per-machine settings)
+.claude/

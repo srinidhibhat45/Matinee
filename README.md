@@ -10,9 +10,22 @@ Matinee is a premium, dark-themed cinema tracking and personalized recommendatio
 
 ## 📱 Features & Highlights
 
-### 🎨 Premium Cinema UI/UX
-- **Sleek Dark Mode:** Tailored cinema-like visual language (Background: `#0A0A0F`, Cards: `#161621`).
-- **Interactive Discover Feed:** Tabbed browse pages, horizontal carousels, customizable grid filters, and paginated searches with lazy loading.
+### 🎨 Material Design 3 UI/UX
+- **Full M3 design system:** Colour, type, shape, elevation, state layers and
+  motion all come from tokens in `constants/m3/`. The colour scheme is generated
+  from a single brand source colour (`#EC407A`) as six HCT tonal palettes, so
+  light and dark are derived rather than hand-tuned and can never drift apart.
+- **Light, dark, and system themes:** Appearance follows the OS by default and
+  can be pinned either way from Settings.
+- **Responsive across window sizes:** Layouts key off M3 window size classes
+  (`hooks/useResponsive.ts`). Phones get a bottom navigation bar; at 600dp and
+  above navigation moves to a side rail, poster grids widen from 3 to 7 columns,
+  and content is capped at a readable measure.
+- **Accessible by construction:** Every colour pair in both schemes clears WCAG
+  AA (4.5:1 for text, 3:1 for meaningful graphics), interactive controls carry
+  roles/labels/state, touch targets meet the 48dp minimum, charts are described
+  for screen readers, and the OS "reduce motion" setting is honoured.
+- **Interactive Discover Feed:** Segmented browse tabs, horizontal carousels, filter chips, and paginated searches with lazy loading.
 - **Media Type Identifiers:** Visual badges indicating whether a title is a **Movie** or **Series** in the recommendations feed and all-inclusive lists.
 - **Enhanced Watchlist Sorting:** Smart sorting rules partition your watchlist, prioritizing **Upcoming Releases** (sorted chronologically by release date) followed by **Released Titles** (latest releases first).
 
@@ -79,6 +92,61 @@ graph TD
    ```
 5. **APK Packaging:** Fetches the completed build artifact URL from the EAS build registry, downloads the APK, and uploads it back to the GitHub workflow run.
 6. **Automatic Release (on Tag):** If triggered by a version tag (`v*`), it creates a GitHub Release, writes the release notes, and uploads the `.apk` directly to the release page.
+
+---
+
+## 📡 Over-the-Air (OTA) Updates
+
+Matinee ships JavaScript, styling, and asset changes straight to installed apps
+through **EAS Update** — no reinstall, no new APK.
+
+### How it behaves in the app
+- On launch, and whenever the app returns to the foreground, it quietly checks
+  for a newer bundle (at most once every 15 minutes).
+- If one is found it downloads in the background and an **"Update ready"**
+  banner offers a one-tap restart. The check is silent — failures and
+  "already up to date" never interrupt you.
+- **Profile → Settings → App Updates** has a manual **Check for Updates**
+  button and shows whether you're running the base build or an OTA update,
+  along with the update **channel** the binary was built with.
+
+> **A build can only receive OTA updates if it was built with a channel.**
+> The channel is baked into the binary at build time from `eas.json`
+> (`build.<profile>.channel`), so an APK built before that field existed will
+> report "up to date" forever no matter what is published. If Settings shows
+> `no channel`, that APK needs rebuilding — an update cannot fix it.
+
+### What ships over the air, and what doesn't
+
+| Change | How it ships |
+| --- | --- |
+| Screens, logic, styles, images, copy | **OTA** — automatic on push to `main` |
+| New native module, config plugin, `app.json`, dependency change | **New APK required** |
+
+This split is enforced by CI rather than left to memory:
+
+- **`.github/workflows/ota-update.yml`** publishes an update on every push to
+  `main`, but a guard job first checks the diff. If `package.json`,
+  `package-lock.json`, `app.json`, `eas.json`, or `android/` / `ios/` changed,
+  it skips the OTA and tells you a rebuild is needed.
+- **`.github/workflows/build-apk.yml`** runs a full EAS build for tagged
+  releases, manual runs, and any push that touches those native-affecting
+  files — and skips the build entirely for JS-only pushes.
+
+`runtimeVersion` uses the `appVersion` policy, so an update is only served to
+binaries built from the same `expo.version`. **When you change anything native,
+bump `version` in `app.json` and cut a `v*` tag** — that produces a fresh APK
+and starts a new compatibility line, so existing installs can never receive a
+bundle their binary can't run.
+
+### Publishing manually
+
+```bash
+npx eas-cli update --branch preview --message "Fix search pagination"
+```
+
+The `preview` build profile is bound to the `preview` channel, which is what
+the distributed APKs use.
 
 ---
 

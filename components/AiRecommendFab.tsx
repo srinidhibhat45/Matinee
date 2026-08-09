@@ -17,6 +17,10 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import { useTheme } from '../context/ThemeContext';
+import { useResponsive } from '../hooks/useResponsive';
+import { FAB } from './m3';
+import { NAVIGATION_BAR_HEIGHT } from './m3/Navigation';
+import { spacing } from '../constants/m3';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getPreference } from '../services/database';
 import { recommendationService, MoodPreferences, MoodRecommendationResult } from '../services/recommendations';
@@ -74,10 +78,19 @@ const ALL_GENRE_IDS = [
 
 // ─── Component ────────────────────────────────────────────────
 
-export default function AiRecommendFab() {
+interface AiRecommendFabProps {
+  /**
+   * Width of the navigation rail when one is showing, so the FAB clears it on
+   * wide windows instead of floating over the destinations.
+   */
+  railOffset?: number;
+}
+
+export default function AiRecommendFab({ railOffset = 0 }: AiRecommendFabProps) {
   const { colors, isDark } = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { isCompact } = useResponsive();
 
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
@@ -184,23 +197,31 @@ export default function AiRecommendFab() {
 
   // ── Render ─────────────────────────────────────────────────
 
-  const accentColor = colors.accent;
-
-  const fabShadow = isDark
-    ? { shadowColor: '#000', shadowOpacity: 0.45, shadowRadius: 10, shadowOffset: { width: 0, height: 5 }, elevation: 10 }
-    : { shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 6 };
+  const accentColor = colors.primary;
+  /** Text/icon colour for anything painted on top of `primary`. */
+  const onAccent = colors.onPrimary;
 
   return (
     <>
-      {/* FAB Button */}
-      <View style={[styles.fabContainer, { bottom: 72 + (insets.bottom > 0 ? insets.bottom : 8) }]}>
-        <TouchableOpacity
-          style={[styles.fabButton, { backgroundColor: colors.elevated }, fabShadow]}
+      {/* FAB — clears the navigation bar on phones and the rail on wide windows. */}
+      <View
+        style={[
+          styles.fabContainer,
+          {
+            bottom: isCompact
+              ? NAVIGATION_BAR_HEIGHT + insets.bottom + spacing.lg
+              : Math.max(insets.bottom, spacing.lg) + spacing.lg,
+            right: spacing.lg + (railOffset > 0 ? 0 : 0),
+          },
+        ]}
+      >
+        <FAB
+          icon="sparkles"
+          variant="primary"
           onPress={openModal}
-          activeOpacity={0.8}
-        >
-          <Ionicons name="sparkles" size={24} color={accentColor} />
-        </TouchableOpacity>
+          accessibilityLabel="Recommend something to watch"
+          accessibilityHint="Opens a form that suggests titles based on your mood"
+        />
       </View>
 
       {/* Modal */}
@@ -233,7 +254,12 @@ export default function AiRecommendFab() {
                   {phase === 'results' ? 'Your Picks' : 'Recommend Me'}
                 </Text>
               </View>
-              <TouchableOpacity onPress={closeModal} hitSlop={12}>
+              <TouchableOpacity
+                onPress={closeModal}
+                hitSlop={16}
+                accessibilityRole="button"
+                accessibilityLabel="Close"
+              >
                 <Ionicons name="close" size={24} color={colors.muted} />
               </TouchableOpacity>
             </View>
@@ -256,9 +282,9 @@ export default function AiRecommendFab() {
                 contentContainerStyle={styles.formContent}
               >
                 {error && (
-                  <View style={[styles.errorBanner, { backgroundColor: 'rgba(239,68,68,0.12)' }]}>
-                    <Ionicons name="alert-circle" size={16} color="#EF4444" />
-                    <Text style={[styles.errorText, { color: '#EF4444' }]}>{error}</Text>
+                  <View style={[styles.errorBanner, { backgroundColor: colors.errorContainer }]} accessibilityLiveRegion="polite">
+                    <Ionicons name="alert-circle" size={16} color={colors.onErrorContainer} />
+                    <Text style={[styles.errorText, { color: colors.onErrorContainer }]}>{error}</Text>
                   </View>
                 )}
 
@@ -279,12 +305,15 @@ export default function AiRecommendFab() {
                         setSelectedMood(m.label);
                         if (Platform.OS !== 'web') Haptics.selectionAsync();
                       }}
+                      accessibilityRole="radio"
+                      accessibilityLabel={m.label}
+                      accessibilityState={{ selected: selectedMood === m.label, checked: selectedMood === m.label }}
                     >
                       <Text style={styles.moodEmoji}>{m.emoji}</Text>
                       <Text
                         style={[
                           styles.moodLabel,
-                          { color: selectedMood === m.label ? '#FFF' : colors.text },
+                          { color: selectedMood === m.label ? onAccent : colors.text },
                         ]}
                       >
                         {m.label}
@@ -312,6 +341,9 @@ export default function AiRecommendFab() {
                           setVibeIntensity(v.level);
                           if (Platform.OS !== 'web') Haptics.selectionAsync();
                         }}
+                        accessibilityRole="radio"
+                        accessibilityLabel={`${v.label}. ${v.desc}`}
+                        accessibilityState={{ selected: isSelected, checked: isSelected }}
                       >
                         <Text style={styles.verticalCardIcon}>{v.icon}</Text>
                         <View style={styles.verticalCardTextContent}>
@@ -351,11 +383,22 @@ export default function AiRecommendFab() {
                         ]}
                         onPress={() => toggleGenre(gId)}
                         disabled={!selected && selectedGenres.length >= 3}
+                        accessibilityRole="checkbox"
+                        accessibilityLabel={name}
+                        accessibilityHint={
+                          !selected && selectedGenres.length >= 3
+                            ? 'Deselect another genre first — three is the maximum'
+                            : undefined
+                        }
+                        accessibilityState={{
+                          checked: selected,
+                          disabled: !selected && selectedGenres.length >= 3,
+                        }}
                       >
                         <Text
                           style={[
                             styles.genreChipText,
-                            { color: selected ? '#FFF' : colors.secondary },
+                            { color: selected ? onAccent : colors.secondary },
                           ]}
                         >
                           {name}
@@ -381,12 +424,15 @@ export default function AiRecommendFab() {
                         setMediaType(mt.value);
                         if (Platform.OS !== 'web') Haptics.selectionAsync();
                       }}
+                      accessibilityRole="radio"
+                      accessibilityLabel={mt.label}
+                      accessibilityState={{ selected: mediaType === mt.value, checked: mediaType === mt.value }}
                     >
                       <Text style={styles.segmentIcon}>{mt.icon}</Text>
                       <Text
                         style={[
                           styles.segmentText,
-                          { color: mediaType === mt.value ? '#FFF' : colors.secondary },
+                          { color: mediaType === mt.value ? onAccent : colors.secondary },
                         ]}
                       >
                         {mt.label}
@@ -415,6 +461,9 @@ export default function AiRecommendFab() {
                             setEra(e);
                             if (Platform.OS !== 'web') Haptics.selectionAsync();
                           }}
+                          accessibilityRole="radio"
+                          accessibilityLabel={e}
+                          accessibilityState={{ selected: isSelected, checked: isSelected }}
                         >
                           <Text style={[styles.gridCardTitle, { color: colors.text, fontWeight: isSelected ? '700' : '500' }]}>
                             {e}
@@ -440,6 +489,9 @@ export default function AiRecommendFab() {
                             setEra(e);
                             if (Platform.OS !== 'web') Haptics.selectionAsync();
                           }}
+                          accessibilityRole="radio"
+                          accessibilityLabel={e}
+                          accessibilityState={{ selected: isSelected, checked: isSelected }}
                         >
                           <Text style={[styles.gridCardTitle, { color: colors.text, fontWeight: isSelected ? '700' : '500' }]}>
                             {e}
@@ -497,6 +549,9 @@ export default function AiRecommendFab() {
                             setDuration(d);
                             if (Platform.OS !== 'web') Haptics.selectionAsync();
                           }}
+                          accessibilityRole="radio"
+                          accessibilityLabel={d}
+                          accessibilityState={{ selected: isSelected, checked: isSelected }}
                         >
                           <Text style={[styles.gridCardTitle, { color: colors.text, fontWeight: isSelected ? '700' : '500' }]}>
                             {d}
@@ -522,6 +577,9 @@ export default function AiRecommendFab() {
                             setDuration(d);
                             if (Platform.OS !== 'web') Haptics.selectionAsync();
                           }}
+                          accessibilityRole="radio"
+                          accessibilityLabel={d}
+                          accessibilityState={{ selected: isSelected, checked: isSelected }}
                         >
                           <Text style={[styles.gridCardTitle, { color: colors.text, fontWeight: isSelected ? '700' : '500' }]}>
                             {d}
@@ -544,9 +602,13 @@ export default function AiRecommendFab() {
                   onPress={handleSubmit}
                   disabled={!selectedMood}
                   activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Find my picks"
+                  accessibilityHint={selectedMood ? undefined : 'Choose a mood first'}
+                  accessibilityState={{ disabled: !selectedMood }}
                 >
-                  <Ionicons name="sparkles" size={18} color={selectedMood ? '#FFF' : colors.muted} />
-                  <Text style={[styles.ctaText, { color: selectedMood ? '#FFF' : colors.muted }]}>
+                  <Ionicons name="sparkles" size={18} color={selectedMood ? onAccent : colors.muted} />
+                  <Text style={[styles.ctaText, { color: selectedMood ? onAccent : colors.muted }]}>
                     Find My Picks
                   </Text>
                 </TouchableOpacity>
@@ -572,6 +634,15 @@ export default function AiRecommendFab() {
                       style={[styles.resultCard, { backgroundColor: colors.elevated, borderColor: colors.border }]}
                       onPress={() => handleCardPress(item.id, item.mediaType)}
                       activeOpacity={0.85}
+                      accessibilityRole="button"
+                      accessibilityLabel={[
+                        item.title,
+                        item.mediaType === 'tv' ? 'Series' : 'Movie',
+                        item.reason,
+                      ]
+                        .filter(Boolean)
+                        .join(', ')}
+                      accessibilityHint="Opens this title"
                     >
                       <View style={styles.resultCardInner}>
                         {/* Poster */}
@@ -658,14 +729,19 @@ export default function AiRecommendFab() {
                     style={[styles.actionButton, { backgroundColor: accentColor }]}
                     onPress={handleTryAgain}
                     activeOpacity={0.8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Try again"
+                    accessibilityHint="Fetches a new set of suggestions"
                   >
-                    <Ionicons name="refresh" size={18} color="#FFF" />
-                    <Text style={styles.actionButtonText}>Try Again</Text>
+                    <Ionicons name="refresh" size={18} color={onAccent} />
+                    <Text style={[styles.actionButtonText, { color: onAccent }]}>Try Again</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.actionButton, { backgroundColor: colors.elevated, borderColor: colors.border, borderWidth: 1 }]}
                     onPress={handleChangePrefs}
                     activeOpacity={0.8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Change preferences"
                   >
                     <Ionicons name="options" size={18} color={colors.text} />
                     <Text style={[styles.actionButtonText, { color: colors.text }]}>Change Preferences</Text>
@@ -686,15 +762,7 @@ const styles = StyleSheet.create({
   // FAB
   fabContainer: {
     position: 'absolute',
-    right: 20,
     zIndex: 100,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  fabButton: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
     alignItems: 'center',
     justifyContent: 'center',
   },

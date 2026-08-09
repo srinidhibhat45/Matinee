@@ -3,18 +3,27 @@
     "name": "Matinee",
     "slug": "matinee",
     "owner": "srinidhibhat45",
-    "version": "1.0.0",
-    "orientation": "portrait",
+    "version": "1.1.0",
+    "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "matinee",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/7802f26a-0f5a-48d0-8669-7a54f315bb7b",
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    },
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": true
     },
     "android": {
       "package": "com.matinee.app",
       "adaptiveIcon": {
-        "backgroundColor": "#0A0A0F",
+        "backgroundColor": "#181213",
         "foregroundImage": "./assets/images/icon.png"
       },
       "permissions": [
@@ -33,25 +42,32 @@
         {
           "image": "./assets/images/splash-icon.png",
           "resizeMode": "contain",
-          "backgroundColor": "#0A0A0F"
+          "backgroundColor": "#FFF8F7",
+          "dark": {
+            "image": "./assets/images/splash-icon.png",
+            "backgroundColor": "#181213"
+          }
         }
       ],
       [
         "expo-notifications",
         {
-          "color": "#FFBF00"
+          "color": "#B80F55"
         }
       ],
       "expo-sqlite",
       "expo-secure-store",
       "expo-sharing",
+      "expo-updates",
       [
         "expo-build-properties",
         {
           "android": {
             "enableProguardInReleaseBuilds": true,
             "enableShrinkResourcesInReleaseBuilds": true,
-            "buildArchs": ["arm64-v8a"]
+            "buildArchs": [
+              "arm64-v8a"
+            ]
           }
         }
       ]

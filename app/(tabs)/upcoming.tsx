@@ -1,28 +1,30 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  Image,
-  TouchableOpacity,
-  ActivityIndicator,
-  RefreshControl,
-  Modal,
-  Pressable,
-  ScrollView,
-} from 'react-native';
+import { View, StyleSheet, FlatList, Image, RefreshControl } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
+import { useResponsive } from '../../hooks/useResponsive';
+import { shape, spacing } from '../../constants/m3';
+import {
+  BottomSheet,
+  Button,
+  Card,
+  Chip,
+  ListItem,
+  Loading,
+  SearchField,
+  SegmentedButtons,
+  Text,
+  NAVIGATION_BAR_HEIGHT,
+} from '../../components/m3';
 import { tmdbService, getImageUrl, limitConcurrency } from '../../services/tmdb';
 import { getItem, addItem, getPreference, setPreference, getAllItems, deleteItem } from '../../services/database';
 import { notificationService } from '../../services/notifications';
 import { calendarService } from '../../services/calendar';
 import GenreChips from '../../components/GenreChips';
-import SearchBar from '../../components/SearchBar';
+import EmptyState from '../../components/EmptyState';
 import { TMDBMediaItem } from '../../types';
 import { getGenreName } from '../../constants/genres';
 import { LANGUAGES, DEFAULT_LANGUAGES } from '../../constants/languages';
@@ -33,13 +35,36 @@ const LANGUAGE_CHIPS = LANGUAGES.filter((l) =>
 
 type TimeBucket = 'thisWeek' | 'thisMonth' | 'later';
 
+/**
+ * Labels are abbreviated so three segments plus the Series toggle fit one row
+ * on a narrow phone; `a11yLabel` restores the full phrasing for screen readers.
+ */
+const BUCKETS: { value: TimeBucket; label: string; a11yLabel: string }[] = [
+  { value: 'thisWeek', label: 'Week', a11yLabel: 'Releasing this week' },
+  { value: 'thisMonth', label: 'Month', a11yLabel: 'Releasing this month' },
+  { value: 'later', label: 'Later', a11yLabel: 'Releasing later' },
+];
+
+/**
+ * Library key for a title. TMDB ids are only unique within a media type, so
+ * keying status/dedup maps by bare id let a movie and a series with the same
+ * id shadow each other.
+ */
+const itemKey = (mediaType: string | undefined, id: number) =>
+  `${mediaType || 'movie'}-${id}`;
+
 export default function UpcomingScreen() {
   const router = useRouter();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
+  const { gutter, isCompact } = useResponsive();
+
+  /** Keeps the last card clear of the navigation bar and the floating FAB. */
+  const bottomPadding =
+    (isCompact ? NAVIGATION_BAR_HEIGHT + insets.bottom : insets.bottom) + 88;
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>(['en']);
   const [upcomingMovies, setUpcomingMovies] = useState<TMDBMediaItem[]>([]);
-  const [dbStatusMap, setDbStatusMap] = useState<Record<number, string>>({});
+  const [dbStatusMap, setDbStatusMap] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeBucket, setActiveBucket] = useState<TimeBucket>('thisMonth');
@@ -90,25 +115,18 @@ export default function UpcomingScreen() {
         setLoadingMore(true);
       }
 
-      // 1. Get all DB items to filter out (watched and not_interested for movies; not_interested only for series)
+      // 1. Get all DB items to filter out (watched and not_interested for movies; not_interested only for series).
+      // Keys carry the media type because TMDB ids are only unique per type.
       const dbItems = await getAllItems();
-      const skipIds = new Set(dbItems.filter(i => {
+      const skipKeys = new Set(dbItems.filter(i => {
         if (i.mediaType === 'movie' && (i.status === 'watched' || i.status === 'not_interested')) return true;
         if (i.mediaType === 'tv' && i.status === 'not_interested') return true;
         return false;
-      }).map(i => i.tmdbId));
+      }).map(i => itemKey(i.mediaType, i.tmdbId)));
 
-      const hotdDbItem = dbItems.find(i => i.tmdbId === 94997);
-      console.log('[Upcoming Debug] dbItems count:', dbItems.length);
-      if (hotdDbItem) {
-        console.log('[Upcoming Debug] House of the Dragon found in DB, status:', hotdDbItem.status);
-      } else {
-        console.log('[Upcoming Debug] House of the Dragon NOT found in DB');
-      }
-
-      const statusMap: Record<number, string> = {};
+      const statusMap: Record<string, string> = {};
       dbItems.forEach((item) => {
-        statusMap[item.tmdbId] = item.status;
+        statusMap[itemKey(item.mediaType, item.tmdbId)] = item.status;
       });
       setDbStatusMap(statusMap);
 
@@ -118,7 +136,7 @@ export default function UpcomingScreen() {
 
       // 3. Pre-filter rawResults to avoid decorating watched/skipped items and disabled media types
       const filteredRawResults = rawResults.filter(item => {
-        if (skipIds.has(item.id)) return false;
+        if (skipKeys.has(itemKey(item.mediaType, item.id))) return false;
         if (!showSeries && item.mediaType === 'tv') return false;
         return true;
       });
@@ -206,10 +224,14 @@ export default function UpcomingScreen() {
       }
 
       setUpcomingMovies((prev) => {
-        const filteredResults = processedResults.filter((m) => !skipIds.has(m.id));
+        const filteredResults = processedResults.filter(
+          (m) => !skipKeys.has(itemKey(m.mediaType, m.id))
+        );
         if (shouldAppend) {
-          const existingIds = new Set(prev.map((m) => m.id));
-          const newUnique = filteredResults.filter((m) => !existingIds.has(m.id));
+          const existingKeys = new Set(prev.map((m) => itemKey(m.mediaType, m.id)));
+          const newUnique = filteredResults.filter(
+            (m) => !existingKeys.has(itemKey(m.mediaType, m.id))
+          );
           const combined = [...prev, ...newUnique];
           return combined.sort(
             (a, b) => new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime()
@@ -241,7 +263,7 @@ export default function UpcomingScreen() {
   const handleItemLongPress = useCallback(async (item: any) => {
     try {
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      const existing = await getItem(item.id);
+      const existing = await getItem(item.id, item.mediaType || 'movie');
       setLongPressStatus(existing?.status || null);
       setLongPressItem(item);
     } catch (err) {
@@ -265,12 +287,12 @@ export default function UpcomingScreen() {
         return;
       }
 
-      const existing = await getItem(tmdbId);
+      const existing = await getItem(tmdbId, mediaType);
 
       if (action === 'watchlist') {
         if (existing?.status === 'watchlist') {
           await deleteItem(existing.id);
-          await notificationService.cancelReminder(tmdbId);
+          await notificationService.cancelReminder(tmdbId, mediaType);
         } else {
           const status = 'watchlist';
           const isUnreleased = longPressItem.releaseDate ? new Date(longPressItem.releaseDate) > new Date() : false;
@@ -303,7 +325,7 @@ export default function UpcomingScreen() {
       } else if (action === 'not_interested') {
         if (existing) {
           await deleteItem(existing.id);
-          await notificationService.cancelReminder(tmdbId);
+          await notificationService.cancelReminder(tmdbId, mediaType);
         }
         await addItem({
           tmdbId,
@@ -522,15 +544,15 @@ export default function UpcomingScreen() {
     async (item: TMDBMediaItem) => {
       try {
         await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        const existingStatus = dbStatusMap[item.id];
+        const existingStatus = dbStatusMap[itemKey(item.mediaType, item.id)];
         if (existingStatus === 'watchlist') {
-          const existing = await getItem(item.id);
+          const existing = await getItem(item.id, item.mediaType);
           if (existing) {
             await deleteItem(existing.id);
-            await notificationService.cancelReminder(item.id);
+            await notificationService.cancelReminder(item.id, item.mediaType);
             setDbStatusMap((prev) => {
               const next = { ...prev };
-              delete next[item.id];
+              delete next[itemKey(item.mediaType, item.id)];
               return next;
             });
           }
@@ -562,7 +584,7 @@ export default function UpcomingScreen() {
 
           setDbStatusMap((prev) => ({
             ...prev,
-            [item.id]: 'watchlist',
+            [itemKey(item.mediaType, item.id)]: 'watchlist',
           }));
         }
       } catch (err) {
@@ -668,405 +690,345 @@ export default function UpcomingScreen() {
       const providers = [
         ...(item.watchProviders?.flatrate || []),
         ...(item.watchProviders?.buy || []).filter(
-          (b: any) => !(item.watchProviders?.flatrate || []).some((f: any) => f.provider_id === b.provider_id)
+          (b: any) =>
+            !(item.watchProviders?.flatrate || []).some((f: any) => f.provider_id === b.provider_id)
         ),
       ].slice(0, 3);
 
-      const isInterested = dbStatusMap[item.id] === 'watchlist';
+      const isInterested = dbStatusMap[itemKey(item.mediaType, item.id)] === 'watchlist';
+      const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
 
       return (
-        <TouchableOpacity
-          style={[styles.upcomingCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+        <Card
+          variant="filled"
+          radius={shape.large}
           onPress={() => handleItemPress(item)}
           onLongPress={() => handleItemLongPress(item)}
-          activeOpacity={0.8}
+          accessibilityLabel={[
+            item.title,
+            item.upcomingEpisodeInfo,
+            typeLabel,
+            `Releases ${releaseDate}`,
+            runtimeStr,
+            genres,
+            langName,
+            isInterested ? 'Reminder set' : null,
+          ]
+            .filter(Boolean)
+            .join(', ')}
+          accessibilityHint="Double tap to open. Long press for quick actions."
         >
-          <View style={styles.posterContainer}>
-            {item.posterPath ? (
-              <Image
-                source={{ uri: getImageUrl(item.posterPath, 'w185') || "" }}
-                style={styles.poster}
-                resizeMode="cover"
-              />
-            ) : (
-              <View style={[styles.poster, styles.posterPlaceholder, { backgroundColor: colors.elevated }]}>
-                <Ionicons name="film-outline" size={24} color={colors.muted} />
-              </View>
-            )}
-            {item.upcomingEventTitle ? (
-              <View style={[styles.premiereBadgeOverlay, { backgroundColor: colors.accent }]}>
-                <Ionicons name="star" size={10} color={colors.bg} />
-              </View>
-            ) : null}
-          </View>
-          <View style={styles.cardInfo}>
-            <View style={styles.cardMainContent}>
-              <View style={styles.cardLeftCol}>
-                <View style={styles.titleCertificationRow}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
-                    <Text style={[styles.cardTitle, { color: colors.text, flexShrink: 1 }]} numberOfLines={1}>
-                      {item.title}
-                    </Text>
-                    {item.upcomingEpisodeInfo ? (
-                      <View style={[styles.epBadgeSmall, { backgroundColor: colors.border }]}>
-                        <Text style={[styles.epBadgeTextSmall, { color: colors.secondary }]}>
-                          {item.upcomingEpisodeInfo}
-                        </Text>
-                      </View>
-                    ) : null}
-                  </View>
-                  {item.certification ? (
-                    <View style={[styles.certBadgeSmall, { borderColor: colors.border }]}>
-                      <Text style={[styles.certBadgeTextSmall, { color: colors.secondary }]}>
-                        {item.certification}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-                
-                <View style={styles.dateRuntimeRow}>
-                  <Text style={[styles.cardDate, { color: colors.accent }]}>{releaseDate}</Text>
-                  {runtimeStr ? (
-                    <>
-                      <Text style={[styles.cardMetaDot, { color: colors.muted }]}>·</Text>
-                      <Text style={[styles.cardDate, { color: colors.secondary }]}>{runtimeStr}</Text>
-                    </>
-                  ) : null}
-                </View>
-
-                {genres ? <Text style={[styles.cardGenres, { color: colors.secondary }]}>{genres}</Text> : null}
-                
-                <View style={styles.cardBadgesRow}>
-                  <View style={[styles.mediaBadge, { backgroundColor: colors.accentMuted }]}>
-                    <Text style={[styles.mediaBadgeText, { color: colors.accent }]}>
-                      {item.mediaType === 'tv' ? 'Series' : 'Movie'}
-                    </Text>
-                  </View>
-
-                  {item.originalLanguage && (
-                    <View style={[styles.mediaBadge, { backgroundColor: colors.border }]}>
-                      <Text style={[styles.mediaBadgeText, { color: colors.secondary }]}>
-                        {langName}
-                      </Text>
-                    </View>
-                  )}
-                </View>
-
-                {/* Watch Platform Row */}
-                <View style={styles.watchPlatformSection}>
-                  {providers.length > 0 ? (
-                    <View style={styles.watchProvidersRow}>
-                      <View style={styles.watchProvidersList}>
-                        {providers.map((p: any) => (
-                          <Image
-                            key={p.provider_id}
-                            source={{ uri: getImageUrl(p.logo_path, 'w92') || "" }}
-                            style={styles.providerLogoSmall}
-                          />
-                        ))}
-                      </View>
-                    </View>
-                  ) : (
-                    <View style={styles.theatreBadge}>
-                      <Ionicons name="film-outline" size={12} color={colors.accent} style={{ marginRight: 4 }} />
-                      <Text style={[styles.theatreText, { color: colors.accent }]}>Theatres</Text>
-                    </View>
-                  )}
-                </View>
-              </View>
-
-              {/* Action Buttons Column */}
-              <View style={styles.cardRightCol}>
-                <TouchableOpacity
+          <View style={styles.cardRow}>
+            <View>
+              {item.posterPath ? (
+                <Image
+                  source={{ uri: getImageUrl(item.posterPath, 'w185') || '' }}
+                  style={styles.poster}
+                  resizeMode="cover"
+                  accessible={false}
+                />
+              ) : (
+                <View
                   style={[
-                    styles.actionPillBtn,
-                    {
-                      backgroundColor: isInterested ? colors.accent : 'transparent',
-                      borderColor: isInterested ? colors.accent : colors.border,
-                    }
+                    styles.poster,
+                    styles.center,
+                    { backgroundColor: colors.surfaceContainerHighest },
                   ]}
-                  onPress={() => handleInterested(item)}
                 >
-                  <Ionicons 
-                    name={isInterested ? "notifications" : "notifications-outline"} 
-                    size={14} 
-                    color={isInterested ? colors.bg : colors.accent} 
-                  />
-                  <Text style={[styles.actionPillText, { color: isInterested ? colors.bg : colors.accent }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
-                    {isInterested ? 'Active' : 'Remind'}
-                  </Text>
-                </TouchableOpacity>
+                  <Ionicons name="film-outline" size={24} color={colors.onSurfaceVariant} />
+                </View>
+              )}
+              {item.upcomingEventTitle ? (
+                <View style={[styles.premiereBadge, { backgroundColor: colors.primary }]}>
+                  <Ionicons name="star" size={11} color={colors.onPrimary} />
+                </View>
+              ) : null}
+            </View>
 
-                <TouchableOpacity
-                  style={[styles.actionPillBtn, { borderColor: colors.border }]}
-                  onPress={() => handleAddToCalendar(item)}
+            <View style={styles.cardBody}>
+              <View style={styles.titleRow}>
+                <Text
+                  variant="titleMedium"
+                  color={colors.onSurface}
+                  numberOfLines={2}
+                  style={styles.flexShrink}
                 >
-                  <Ionicons name="calendar-outline" size={14} color={colors.secondary} />
-                  <Text style={[styles.actionPillText, { color: colors.secondary }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
-                    Calendar
+                  {item.title}
+                </Text>
+                {item.certification ? (
+                  <View style={[styles.pillOutlined, { borderColor: colors.outlineVariant }]}>
+                    <Text variant="labelSmall" color={colors.onSurfaceVariant}>
+                      {item.certification}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+
+              <View style={styles.metaRow}>
+                <Ionicons name="calendar-outline" size={14} color={colors.primary} />
+                <Text variant="labelLarge" color={colors.primary}>
+                  {releaseDate}
+                </Text>
+                {runtimeStr ? (
+                  <Text variant="bodySmall" color={colors.onSurfaceVariant}>
+                    · {runtimeStr}
                   </Text>
-                </TouchableOpacity>
+                ) : null}
+              </View>
+
+              {genres ? (
+                <Text variant="bodySmall" color={colors.onSurfaceVariant} numberOfLines={1}>
+                  {genres}
+                </Text>
+              ) : null}
+
+              <View style={styles.badgeRow}>
+                <View style={[styles.pill, { backgroundColor: colors.secondaryContainer }]}>
+                  <Text variant="labelSmall" color={colors.onSecondaryContainer}>
+                    {typeLabel}
+                  </Text>
+                </View>
+
+                {item.upcomingEpisodeInfo ? (
+                  <View style={[styles.pill, { backgroundColor: colors.tertiaryContainer }]}>
+                    <Text variant="labelSmall" color={colors.onTertiaryContainer}>
+                      {item.upcomingEpisodeInfo}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {item.originalLanguage ? (
+                  <View style={[styles.pill, { backgroundColor: colors.surfaceContainerHighest }]}>
+                    <Text variant="labelSmall" color={colors.onSurfaceVariant}>
+                      {langName}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+
+              {/* Where to watch */}
+              {providers.length > 0 ? (
+                <View
+                  style={styles.providerRow}
+                  accessible
+                  accessibilityLabel={`Streaming on ${providers
+                    .map((p: any) => p.provider_name)
+                    .filter(Boolean)
+                    .join(', ')}`}
+                >
+                  {providers.map((p: any) => (
+                    <Image
+                      key={p.provider_id}
+                      source={{ uri: getImageUrl(p.logo_path, 'w92') || '' }}
+                      style={styles.providerLogo}
+                      accessible={false}
+                    />
+                  ))}
+                </View>
+              ) : (
+                <View style={styles.metaRow}>
+                  <Ionicons name="film-outline" size={13} color={colors.onSurfaceVariant} />
+                  <Text variant="labelMedium" color={colors.onSurfaceVariant}>
+                    In theatres
+                  </Text>
+                </View>
+              )}
+
+              {/* Actions */}
+              <View style={styles.actionRow}>
+                <Button
+                  label={isInterested ? 'On' : 'Remind'}
+                  icon={isInterested ? 'notifications' : 'notifications-outline'}
+                  variant={isInterested ? 'filled' : 'outlined'}
+                  size="small"
+                  onPress={() => handleInterested(item)}
+                  accessibilityLabel={
+                    isInterested
+                      ? `Turn off release reminder for ${item.title}`
+                      : `Remind me when ${item.title} is released`
+                  }
+                />
+                <Button
+                  label="Calendar"
+                  icon="calendar-outline"
+                  variant="text"
+                  size="small"
+                  onPress={() => handleAddToCalendar(item)}
+                  accessibilityLabel={`Add ${item.title} to your calendar`}
+                />
               </View>
             </View>
           </View>
-        </TouchableOpacity>
+        </Card>
       );
     },
-    [handleItemPress, handleAddToCalendar, handleInterested, colors, dbStatusMap]
+    [handleItemPress, handleItemLongPress, handleAddToCalendar, handleInterested, colors, dbStatusMap]
   );
 
+  const listContentStyle = {
+    paddingHorizontal: gutter,
+    paddingBottom: bottomPadding,
+    gap: spacing.md,
+  };
+
   return (
-    <View style={[styles.container, { backgroundColor: colors.bg }]}>
-      <View style={[styles.header, { paddingTop: Math.max(16, insets.top) + 12 }]}>
-        <Text style={[styles.headerTitle, { color: colors.text }]}>Upcoming</Text>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      {/* Header */}
+      <View style={[styles.header, { paddingTop: insets.top + spacing.md, paddingHorizontal: gutter }]}>
+        <Text variant="headlineMedium" color={colors.onSurface} accessibilityRole="header">
+          Upcoming
+        </Text>
       </View>
 
-      {/* Search Bar */}
-      <View style={styles.searchContainer}>
-        <SearchBar
+      {/* Search */}
+      <View style={{ paddingHorizontal: gutter, paddingBottom: spacing.md }}>
+        <SearchField
           value={searchQuery}
           onChangeText={setSearchQuery}
-          placeholder="Search upcoming movies..."
+          placeholder="Search upcoming releases"
+          accessibilityLabel="Search upcoming releases"
           onClear={() => setSearchQuery('')}
         />
       </View>
 
-      {/* Language Filter */}
+      {/* Language filter */}
       <View style={styles.filterSection}>
         <GenreChips
           genres={LANGUAGE_CHIPS.map((l) => ({ id: l.id as any, name: l.name }))}
           selectedIds={selectedLanguages as any[]}
           onToggle={handleLanguageToggle as any}
+          gutter={gutter}
         />
       </View>
 
-      {/* Time Buckets / Search Mode Indicator */}
+      {/* Time buckets, or a note that search spans everything */}
       {searchQuery.trim() ? (
-        <View style={styles.searchModeIndicator}>
-          <Ionicons name="search-outline" size={16} color={colors.accent} style={{ marginRight: 6 }} />
-          <Text style={[styles.searchModeText, { color: colors.secondary }]}>
+        <View style={[styles.searchNote, { paddingHorizontal: gutter }]}>
+          <Ionicons name="information-circle-outline" size={16} color={colors.onSurfaceVariant} />
+          <Text variant="bodyMedium" color={colors.onSurfaceVariant}>
             Searching all upcoming releases
           </Text>
         </View>
       ) : (
-        <View style={styles.bucketRow}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ gap: 8 }}
-            style={{ flex: 1 }}
-          >
-            {[
-              { key: 'thisWeek' as TimeBucket, label: 'This Week' },
-              { key: 'thisMonth' as TimeBucket, label: 'This Month' },
-              { key: 'later' as TimeBucket, label: 'Coming Soon' },
-            ].map(({ key, label }) => (
-              <TouchableOpacity
-                key={key}
-                style={[
-                  styles.bucketChip,
-                  { backgroundColor: colors.card, borderColor: colors.border },
-                  activeBucket === key && { backgroundColor: colors.accent, borderColor: colors.accent },
-                ]}
-                onPress={() => setActiveBucket(key)}
-              >
-                <Text
-                  style={[
-                    styles.bucketText,
-                    { color: colors.secondary },
-                    activeBucket === key && { color: colors.bg },
-                  ]}
-                >
-                  {label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-
-          <TouchableOpacity
-            style={[
-              styles.seriesToggleBtn,
-              { backgroundColor: colors.card, borderColor: colors.border },
-              showSeries && { backgroundColor: colors.accentMuted, borderColor: colors.accent },
-            ]}
+        <View style={[styles.bucketRow, { paddingHorizontal: gutter }]}>
+          <SegmentedButtons
+            options={BUCKETS}
+            value={activeBucket}
+            onChange={setActiveBucket}
+            accessibilityLabel="Release window"
+            dense
+            style={styles.flexOne}
+          />
+          <Chip
+            label="Series"
+            variant="filter"
+            selected={showSeries}
             onPress={() => {
               setShowSeries(!showSeries);
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             }}
-          >
-            <Ionicons
-              name={showSeries ? "checkbox" : "square-outline"}
-              size={14}
-              color={showSeries ? colors.accent : colors.secondary}
-              style={{ marginRight: 4 }}
-            />
-            <Text
-              style={[
-                styles.seriesToggleText,
-                { color: showSeries ? colors.accent : colors.secondary },
-              ]}
-            >
-              Series
-            </Text>
-          </TouchableOpacity>
+            accessibilityHint={
+              showSeries ? 'Hides TV series from the list' : 'Includes TV series in the list'
+            }
+          />
         </View>
       )}
 
-      {/* Movie List */}
+      {/* List */}
       {searchQuery.trim() ? (
         isApiSearching ? (
-          <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
+          <Loading label="Searching upcoming releases" size="large" style={styles.topSpaced} />
         ) : (
           <FlatList
-            style={styles.flatList}
-            data={apiSearchResults.filter(m => showSeries || m.mediaType !== 'tv')}
+            style={styles.flexOne}
+            data={apiSearchResults.filter((m) => showSeries || m.mediaType !== 'tv')}
             renderItem={renderUpcomingItem}
-            keyExtractor={(item) => `upcoming-search-${item.id}`}
+            keyExtractor={(item) => `upcoming-search-${item.mediaType || 'movie'}-${item.id}`}
             showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 100 }}
+            contentContainerStyle={listContentStyle}
+            keyboardShouldPersistTaps="handled"
             ListEmptyComponent={
-              <View style={styles.emptyState}>
-                <Ionicons name="search-outline" size={48} color={colors.muted} />
-                <Text style={[styles.emptyTitle, { color: colors.text }]}>No upcoming releases found</Text>
-                <Text style={[styles.emptySubtitle, { color: colors.secondary }]}>
-                  Try a different query or search term
-                </Text>
-              </View>
-            }
-          />
-        )
-      ) : (
-        loading && page === 1 ? (
-          <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
-        ) : (
-          <FlatList
-            style={styles.flatList}
-            data={filteredMovies}
-            renderItem={renderUpcomingItem}
-            keyExtractor={(item) => `upcoming-${item.id}`}
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 100 }}
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                onRefresh={onRefresh}
-                tintColor={colors.accent}
+              <EmptyState
+                icon="search-outline"
+                title="Nothing found"
+                subtitle="Try a different title or search term."
+                compact
               />
             }
-            onEndReached={handleLoadMore}
-            onEndReachedThreshold={0.5}
-            ListFooterComponent={
-              loadingMore ? (
-                <ActivityIndicator size="small" color={colors.accent} style={{ marginVertical: 16 }} />
-              ) : null
-            }
-            ListEmptyComponent={
-              <View style={styles.emptyState}>
-                <Ionicons name="calendar-outline" size={48} color={colors.muted} />
-                <Text style={[styles.emptyTitle, { color: colors.text }]}>No upcoming releases</Text>
-                <Text style={[styles.emptySubtitle, { color: colors.secondary }]}>
-                  Try selecting different languages or time period
-                </Text>
-              </View>
-            }
           />
         )
+      ) : loading && page === 1 ? (
+        <Loading label="Loading upcoming releases" size="large" style={styles.topSpaced} />
+      ) : (
+        <FlatList
+          style={styles.flexOne}
+          data={filteredMovies}
+          renderItem={renderUpcomingItem}
+          keyExtractor={(item) => `upcoming-${item.mediaType || 'movie'}-${item.id}`}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={listContentStyle}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+              progressBackgroundColor={colors.surfaceContainerHigh}
+            />
+          }
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={loadingMore ? <Loading label="Loading more releases" /> : null}
+          ListEmptyComponent={
+            <EmptyState
+              icon="calendar-outline"
+              title="Nothing scheduled"
+              subtitle="Try another time window, or add more languages in your library settings."
+              compact
+            />
+          }
+        />
       )}
 
-      {/* Long Press Quick Actions Bottom Sheet */}
-      {longPressItem && (
-        <Modal
-          visible={!!longPressItem}
-          transparent
-          animationType="slide"
-          onRequestClose={() => setLongPressItem(null)}
-        >
-          <Pressable style={styles.bottomSheetOverlay} onPress={() => setLongPressItem(null)}>
-            <Pressable
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: colors.elevated },
-              ]}
-              onPress={(e) => e.stopPropagation()}
-            >
-              {/* Header */}
-              <View style={styles.bottomSheetHeader}>
-                <View style={[styles.bottomSheetHandle, { backgroundColor: colors.border }]} />
-                <Text style={[styles.bottomSheetTitle, { color: colors.text }]} numberOfLines={1}>
-                  {longPressItem.title}
-                </Text>
-                {longPressItem.releaseDate && (
-                  <Text style={[styles.bottomSheetSubtitle, { color: colors.secondary }]}>
-                    {new Date(longPressItem.releaseDate) > new Date() ? 'Unreleased' : 'Released in ' + longPressItem.releaseDate.substring(0, 4)}
-                  </Text>
-                )}
-              </View>
+      {/* Quick actions */}
+      <BottomSheet
+        visible={!!longPressItem}
+        onDismiss={() => setLongPressItem(null)}
+        title={longPressItem?.title ?? ''}
+        subtitle={
+          longPressItem?.releaseDate
+            ? new Date(longPressItem.releaseDate) > new Date()
+              ? 'Not yet released'
+              : `Released in ${longPressItem.releaseDate.substring(0, 4)}`
+            : undefined
+        }
+      >
+        <View style={styles.sheetList}>
+          {longPressItem &&
+          !(longPressItem.releaseDate && new Date(longPressItem.releaseDate) > new Date()) ? (
+            <ListItem
+              headline="Rate and log"
+              leadingIcon="star-outline"
+              leadingIconColor={colors.primary}
+              onPress={() => handleLongPressAction('rate')}
+            />
+          ) : null}
 
-              {/* Options */}
-              <View style={styles.bottomSheetOptions}>
-                {/* Option 1: Rate & Log (only if released) */}
-                {!(longPressItem.releaseDate && new Date(longPressItem.releaseDate) > new Date()) && (
-                  <TouchableOpacity
-                    style={[styles.bottomSheetOptionBtn, { borderBottomWidth: 0.5, borderBottomColor: colors.border }]}
-                    onPress={() => handleLongPressAction('rate')}
-                  >
-                    <Ionicons name="star" size={20} color={colors.accent} style={{ marginRight: 12 }} />
-                    <Text style={[styles.bottomSheetOptionText, { color: colors.text }]}>Rate & Log</Text>
-                  </TouchableOpacity>
-                )}
+          <ListItem
+            headline={longPressStatus === 'watchlist' ? 'Remove from watchlist' : 'Add to watchlist'}
+            leadingIcon={longPressStatus === 'watchlist' ? 'bookmark' : 'bookmark-outline'}
+            leadingIconColor={colors.primary}
+            onPress={() => handleLongPressAction('watchlist')}
+          />
 
-                {/* Option 2: Add to Watchlist / Remove from Watchlist */}
-                <TouchableOpacity
-                  style={[styles.bottomSheetOptionBtn, { borderBottomWidth: 0.5, borderBottomColor: colors.border }]}
-                  onPress={() => handleLongPressAction('watchlist')}
-                >
-                  <Ionicons
-                    name={
-                      longPressStatus === 'watchlist'
-                        ? 'bookmark'
-                        : 'bookmark-outline'
-                    }
-                    size={20}
-                    color={colors.accent}
-                    style={{ marginRight: 12 }}
-                  />
-                  <Text style={[styles.bottomSheetOptionText, { color: colors.text }]}>
-                    {longPressStatus === 'watchlist'
-                      ? 'Remove from Watchlist'
-                      : 'Add to Watchlist'}
-                  </Text>
-                </TouchableOpacity>
-
-                {/* Option 3: Not Interested */}
-                <TouchableOpacity
-                  style={styles.bottomSheetOptionBtn}
-                  onPress={() => handleLongPressAction('not_interested')}
-                >
-                  <Ionicons
-                    name={longPressStatus === 'not_interested' ? 'eye-off' : 'eye-off-outline'}
-                    size={20}
-                    color={colors.accent}
-                    style={{ marginRight: 12 }}
-                  />
-                  <Text style={[styles.bottomSheetOptionText, { color: colors.text }]}>
-                    {longPressStatus === 'not_interested'
-                      ? 'Remove from Not Interested'
-                      : 'Not Interested'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* Cancel button */}
-              <TouchableOpacity
-                style={[styles.bottomSheetCancelBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-                onPress={() => setLongPressItem(null)}
-              >
-                <Text style={[styles.bottomSheetCancelText, { color: colors.text }]}>Cancel</Text>
-              </TouchableOpacity>
-            </Pressable>
-          </Pressable>
-        </Modal>
-      )}
+          <ListItem
+            headline={longPressStatus === 'not_interested' ? 'Show this again' : 'Not interested'}
+            leadingIcon={longPressStatus === 'not_interested' ? 'eye-off' : 'eye-off-outline'}
+            leadingIconColor={colors.primary}
+            onPress={() => handleLongPressAction('not_interested')}
+          />
+        </View>
+      </BottomSheet>
     </View>
   );
 }
@@ -1075,315 +1037,111 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  header: {
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+  flexOne: {
+    flex: 1,
   },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: '800',
-    letterSpacing: -0.5,
+  flexShrink: {
+    flexShrink: 1,
+  },
+  center: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  topSpaced: {
+    marginTop: spacing.xxl,
+  },
+
+  header: {
+    paddingBottom: spacing.md,
   },
   filterSection: {
-    paddingBottom: 8,
+    paddingBottom: spacing.md,
   },
-  searchContainer: {
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-  },
-  cardBadgesRow: {
+  searchNote: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
     alignItems: 'center',
-    marginTop: 4,
+    gap: spacing.sm,
+    paddingBottom: spacing.md,
   },
   bucketRow: {
     flexDirection: 'row',
-    paddingHorizontal: 16,
-    gap: 8,
-    marginBottom: 16,
     alignItems: 'center',
+    gap: spacing.sm,
+    paddingBottom: spacing.md,
   },
-  searchModeIndicator: {
+
+  cardRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 16,
-  },
-  searchModeText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  bucketChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  bucketActive: {},
-  bucketText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  bucketTextActive: {},
-  upcomingCard: {
-    flexDirection: 'row',
-    borderRadius: 14,
-    overflow: 'hidden',
-    marginBottom: 12,
-    borderWidth: 0.5,
+    padding: spacing.md,
+    gap: spacing.md,
   },
   poster: {
-    width: 100,
-    height: 150,
+    width: 80,
+    height: 120,
+    borderRadius: shape.small,
   },
-  posterContainer: {
-    position: 'relative',
-    width: 100,
-    height: 150,
-  },
-  premiereBadgeOverlay: {
+  premiereBadge: {
     position: 'absolute',
-    top: 6,
-    left: 6,
-    borderRadius: 999,
-    padding: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
-    shadowRadius: 1.5,
-    elevation: 2,
-    zIndex: 10,
-  },
-  posterPlaceholder: {
-    justifyContent: 'center',
+    top: spacing.xs,
+    left: spacing.xs,
+    width: 22,
+    height: 22,
+    borderRadius: shape.full,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  cardInfo: {
+  cardBody: {
     flex: 1,
-    padding: 12,
+    gap: spacing.xs,
   },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 4,
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
   },
-  cardDate: {
-    fontSize: 13,
-    fontWeight: '600',
-    marginBottom: 4,
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    flexWrap: 'wrap',
   },
-  cardGenres: {
-    fontSize: 12,
-    marginBottom: 6,
+  badgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    marginTop: spacing.xxs,
   },
-  mediaBadge: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 8,
+  pill: {
+    paddingHorizontal: spacing.sm,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: shape.extraSmall,
   },
-  mediaBadgeText: {
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  cardMainContent: {
-    flexDirection: 'row',
-    flex: 1,
-  },
-  cardLeftCol: {
-    flex: 1,
-    paddingRight: 4,
-  },
-  cardRightCol: {
-    width: 84,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 8,
-    paddingLeft: 4,
-  },
-  actionPillBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    paddingVertical: 6,
-    paddingHorizontal: 4,
-    borderRadius: 20,
-    borderWidth: 1,
-    width: '100%',
-    height: 32,
-  },
-  actionPillText: {
-    fontSize: 10.5,
-    fontWeight: '700',
-  },
-  emptyState: {
-    alignItems: 'center',
-    marginTop: 60,
-    gap: 8,
-  },
-  emptyTitle: {
-    fontSize: 17,
-    fontWeight: '600',
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    textAlign: 'center',
-    paddingHorizontal: 40,
-  },
-  titleCertificationRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-    gap: 6,
-  },
-  certBadgeSmall: {
-    paddingHorizontal: 4,
+  pillOutlined: {
+    paddingHorizontal: spacing.sm,
     paddingVertical: 1,
-    borderRadius: 3,
-    borderWidth: 0.8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  certBadgeTextSmall: {
-    fontSize: 9,
-    fontWeight: '800',
-  },
-  dateRuntimeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginTop: 2,
-    marginBottom: 4,
-  },
-  cardMetaDot: {
-    fontSize: 12,
-  },
-  watchPlatformSection: {
-    marginTop: 6,
-    marginBottom: 2,
-  },
-  watchProvidersRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  watchLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  watchProvidersList: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  providerLogoSmall: {
-    width: 16,
-    height: 16,
-    borderRadius: 4,
-  },
-  theatreBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    backgroundColor: 'rgba(255, 191, 0, 0.1)',
-  },
-  theatreText: {
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-  bottomSheetOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'flex-end',
-  },
-  bottomSheetContent: {
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    paddingHorizontal: 24,
-    paddingTop: 12,
-    paddingBottom: 34,
-  },
-  bottomSheetHeader: {
-    alignItems: 'center',
-    paddingVertical: 12,
-  },
-  bottomSheetHandle: {
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    marginBottom: 16,
-  },
-  bottomSheetTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    textAlign: 'center',
-  },
-  bottomSheetSubtitle: {
-    fontSize: 12,
-    fontWeight: '500',
-    marginTop: 4,
-  },
-  bottomSheetOptions: {
-    borderRadius: 14,
-    overflow: 'hidden',
-    marginTop: 16,
-    marginBottom: 16,
-  },
-  bottomSheetOptionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
-  },
-  bottomSheetOptionText: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  bottomSheetCancelBtn: {
-    borderRadius: 14,
-    paddingVertical: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
+    borderRadius: shape.extraSmall,
     borderWidth: 1,
   },
-  bottomSheetCancelText: {
-    fontSize: 15,
-    fontWeight: '700',
+  providerRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.xxs,
   },
-  seriesToggleBtn: {
+  providerLogo: {
+    width: 26,
+    height: 26,
+    borderRadius: shape.extraSmall,
+  },
+  actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    marginLeft: 8,
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
   },
-  seriesToggleText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  epBadgeSmall: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  epBadgeTextSmall: {
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  flatList: {
-    flex: 1,
+
+  sheetList: {
+    marginHorizontal: -spacing.xl,
   },
 });

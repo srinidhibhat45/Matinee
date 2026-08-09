@@ -14,13 +14,15 @@ import {
   Pressable,
   KeyboardAvoidingView,
   Platform,
-  ToastAndroid,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
+import { useResponsive } from '../../hooks/useResponsive';
+import { shape, spacing } from '../../constants/m3';
+import { IconButton, Snackbar } from '../../components/m3';
 import { tmdbService, getImageUrl } from '../../services/tmdb';
 import { recommendationService } from '../../services/recommendations';
 import {
@@ -34,6 +36,7 @@ import {
   deleteEpisodeRating,
   updateItem,
   getPreference,
+  saveDirectorsActors,
 } from '../../services/database';
 import { calendarService } from '../../services/calendar';
 import { notificationService } from '../../services/notifications';
@@ -41,7 +44,7 @@ import CarouselSection from '../../components/CarouselSection';
 import { getGenreName } from '../../constants/genres';
 import type { MediaType, CastMember, EpisodeRating } from '../../types';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 const MOOD_EMOJIS = [
   { emoji: '🤯', label: 'Mind-blown' },
@@ -84,6 +87,110 @@ const isEpFuture = (dateStr: string | null) => {
   return dateStr > todayStr;
 };
 
+const STAR_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+/**
+ * YouTube's brand red, darkened for light backgrounds.
+ *
+ * Pure #FF0000 only reaches 2.8:1 against a light surface, under the 3:1 that
+ * WCAG 1.4.11 requires for a meaningful icon. The darker tone stays
+ * recognisably YouTube while clearing the bar.
+ */
+const YOUTUBE_RED_DARK_BG = '#FF3B30';
+const YOUTUBE_RED_LIGHT_BG = '#CC0000';
+
+/**
+ * A 1–10 star input.
+ *
+ * The row as a whole is the accessibility node — an `adjustable` control that
+ * announces the current score and responds to swipe-up/swipe-down — because ten
+ * individually-focusable stars make a screen reader read "star, star, star…"
+ * with no indication of the value. Each star still gets a padded 44dp-wide hit
+ * area for touch, and the whole row is at least 48dp tall.
+ */
+function StarRow({
+  value,
+  onChange,
+  size = 24,
+  label,
+  /** Lets an unset detailed category read as "not rated" rather than zero. */
+  allowNull = false,
+}: {
+  value: number | null;
+  onChange: (v: any) => void;
+  size?: number;
+  label: string;
+  allowNull?: boolean;
+}) {
+  const { colors } = useTheme();
+  const current = value ?? 0;
+
+  const setValue = (next: number) => {
+    // Tapping the active star clears the rating, which is the only way to undo
+    // a mis-tap without a separate control.
+    const cleared = allowNull ? null : 0;
+    onChange(current === next ? cleared : next);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+
+  const adjust = (delta: number) => {
+    const next = Math.min(10, Math.max(allowNull ? 0 : 1, current + delta));
+    onChange(next === 0 && allowNull ? null : next);
+  };
+
+  return (
+    <View
+      style={starRowStyles.row}
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel={label}
+      accessibilityValue={{
+        min: 0,
+        max: 10,
+        now: current,
+        text: current > 0 ? `${current} out of 10` : 'Not rated',
+      }}
+      accessibilityHint="Swipe up or down to change the rating"
+      onAccessibilityAction={(event) => {
+        if (event.nativeEvent.actionName === 'increment') adjust(1);
+        if (event.nativeEvent.actionName === 'decrement') adjust(-1);
+      }}
+      accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+    >
+      {STAR_VALUES.map((val) => (
+        <Pressable
+          key={val}
+          onPress={() => setValue(val)}
+          // Individual stars are hidden; the row above speaks for them.
+          accessibilityElementsHidden
+          importantForAccessibility="no"
+          hitSlop={{ top: 12, bottom: 12, left: 2, right: 2 }}
+          style={starRowStyles.star}
+        >
+          <Ionicons
+            name={val <= current ? 'star' : 'star-outline'}
+            size={size}
+            color={val <= current ? colors.rating[current] ?? colors.primary : colors.outline}
+          />
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+const starRowStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 48,
+  },
+  star: {
+    paddingHorizontal: 2,
+    paddingVertical: 8,
+  },
+});
+
+/** Overall score input. */
 function SimpleStarRow({
   rating,
   onRate,
@@ -93,29 +200,12 @@ function SimpleStarRow({
   onRate: (r: number) => void;
   size?: number;
 }) {
-  const { colors } = useTheme();
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((val) => (
-        <TouchableOpacity
-          key={val}
-          onPress={() => {
-            onRate(rating === val ? 0 : val);
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          }}
-          activeOpacity={0.7}
-        >
-          <Ionicons
-            name={val <= rating ? 'star' : 'star-outline'}
-            size={size}
-            color={val <= rating ? colors.accent : colors.border}
-          />
-        </TouchableOpacity>
-      ))}
-    </View>
+    <StarRow value={rating} onChange={onRate} size={size} label="Overall rating" />
   );
 }
 
+/** One labelled sub-score (plot, acting, visuals…). */
 function DetailedStarRow({
   value,
   onChange,
@@ -133,32 +223,20 @@ function DetailedStarRow({
     <View style={styles.ratingSliderContainer}>
       <View style={styles.ratingSliderHeader}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <Ionicons name={icon as any} size={16} color={colors.secondary} />
-          <Text style={[styles.ratingSliderLabel, { color: colors.secondary }]}>{label}</Text>
+          <Ionicons name={icon as any} size={16} color={colors.onSurfaceVariant} />
+          <Text style={[styles.ratingSliderLabel, { color: colors.onSurfaceVariant }]}>{label}</Text>
         </View>
-        <Text style={[styles.ratingSliderValue, { color: colors.muted }, value !== null && value > 0 && { color: colors.accent }]}>
+        <Text
+          style={[
+            styles.ratingSliderValue,
+            { color: colors.outline },
+            value !== null && value > 0 && { color: colors.primary },
+          ]}
+        >
           {value !== null && value > 0 ? value : '—'}
         </Text>
       </View>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 6 }}>
-        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((val) => (
-          <TouchableOpacity
-            key={val}
-            onPress={() => {
-              onChange(value === val ? null : val);
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            }}
-            activeOpacity={0.7}
-            hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
-          >
-            <Ionicons
-              name={value !== null && val <= value ? 'star' : 'star-outline'}
-              size={20}
-              color={value !== null && val <= value ? colors.accent : colors.border}
-            />
-          </TouchableOpacity>
-        ))}
-      </View>
+      <StarRow value={value} onChange={onChange} size={20} label={label} allowNull />
     </View>
   );
 }
@@ -166,10 +244,29 @@ function DetailedStarRow({
 export default function DetailScreen() {
   const { id, mediaType: mt, autoRate, reason } = useLocalSearchParams<{ id: string; mediaType: string; autoRate?: string; reason?: string }>();
   const router = useRouter();
-  const { colors, isDark } = useTheme();
+  const { colors, isDark, reduceMotion } = useTheme();
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useResponsive();
   const mediaType = (mt || 'movie') as MediaType;
   const tmdbId = Number(id);
+
+  // Cross-platform replacement for the Android-only toast this screen used to
+  // show, so iOS and web get the same confirmation.
+  const [snackbar, setSnackbar] = useState<string | null>(null);
+  const showSnackbar = useCallback((message: string) => setSnackbar(message), []);
+
+  const YOUTUBE_RED = isDark ? YOUTUBE_RED_DARK_BG : YOUTUBE_RED_LIGHT_BG;
+
+  /** Foreground for the AI taste-match badge, matched to its container. */
+  const matchScoreColor = useCallback(
+    (score: number) =>
+      score >= 80
+        ? colors.onPrimaryContainer
+        : score >= 50
+          ? colors.onTertiaryContainer
+          : colors.onSurfaceVariant,
+    [colors]
+  );
 
   const [details, setDetails] = useState<any>(null);
   const [geminiApiKey, setGeminiApiKey] = useState<string | null>(null);
@@ -198,7 +295,7 @@ export default function DetailScreen() {
   const [watchMonth, setWatchMonth] = useState(String(today.getMonth() + 1).padStart(2, '0'));
   const [watchYear, setWatchYear] = useState(String(today.getFullYear()));
 
-  const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  const slideAnim = useRef(new Animated.Value(windowHeight)).current;
   const [keyboardAvoidingEnabled, setKeyboardAvoidingEnabled] = useState(false);
 
   useEffect(() => {
@@ -216,8 +313,8 @@ export default function DetailScreen() {
 
   const handleClose = useCallback(() => {
     Animated.timing(slideAnim, {
-      toValue: SCREEN_HEIGHT,
-      duration: 200,
+      toValue: windowHeight,
+      duration: reduceMotion ? 0 : 200,
       useNativeDriver: true,
     }).start(() => {
       if (router.canGoBack()) {
@@ -226,7 +323,7 @@ export default function DetailScreen() {
         router.replace('/(tabs)');
       }
     });
-  }, [router, slideAnim]);
+  }, [router, slideAnim, windowHeight, reduceMotion]);
 
   const resetRatingForm = useCallback(() => {
     setOverallRating(0);
@@ -297,7 +394,7 @@ export default function DetailScreen() {
       setDetails(data);
 
       // Check if user has this in their library
-      const existing = await getItem(tmdbId);
+      const existing = await getItem(tmdbId, mediaType);
       if (existing) {
         setItemStatus(existing.status);
         const rating = await dbGetRating(existing.id);
@@ -412,6 +509,53 @@ export default function DetailScreen() {
     };
   }, [tmdbId, mediaType, activeSeasonNumber]);
 
+  /**
+   * Cache this title's director and top cast so the recommendation engine can
+   * learn which people the user gravitates towards.
+   *
+   * `getDetails` flattens TMDB's `credits` block into top-level `cast` / `crew`
+   * arrays — reading `details.credits` here (as an earlier version did) always
+   * came back undefined, so no people were ever recorded and every
+   * director/actor signal in the recommender sat empty.
+   */
+  const persistPeople = useCallback(async () => {
+    try {
+      if (!details) return;
+
+      const existing = await getItem(tmdbId, mediaType);
+      if (!existing) return;
+
+      const crew: any[] = details.crew ?? [];
+      const cast: any[] = details.cast ?? [];
+
+      const people = [
+        ...crew
+          .filter((c: any) => c.job === 'Director')
+          .map((d: any) => ({
+            itemId: existing.id,
+            personId: d.id,
+            personName: d.name,
+            role: 'director' as const,
+            profilePath: d.profile_path ?? null,
+          })),
+        ...cast.slice(0, 5).map((a: any) => ({
+          itemId: existing.id,
+          personId: a.id,
+          personName: a.name,
+          role: 'actor' as const,
+          profilePath: a.profile_path ?? null,
+        })),
+      ];
+
+      if (people.length > 0) {
+        await saveDirectorsActors(existing.id, people);
+      }
+    } catch (err) {
+      // Never block a save on the people cache.
+      console.warn('Failed to persist cast/crew:', err);
+    }
+  }, [details, tmdbId]);
+
   const handleAction = useCallback(
     async (status: 'watched' | 'watchlist' | 'interested' | 'not_interested') => {
       try {
@@ -419,10 +563,13 @@ export default function DetailScreen() {
 
         if (itemStatus === status) {
           // Unbookmark: delete the item from the DB
-          const existing = await getItem(tmdbId);
+          const existing = await getItem(tmdbId, mediaType);
           if (existing) {
             await deleteItem(existing.id);
           }
+          // Drop any release reminder that was scheduled alongside it,
+          // otherwise the user keeps getting alerts for a removed title.
+          await notificationService.cancelReminder(tmdbId, mediaType);
           setItemStatus(null);
           setUserRating(null);
           setEpisodeRatings([]);
@@ -447,40 +594,8 @@ export default function DetailScreen() {
 
         setItemStatus(status);
 
-        // Save directors and actors for recommendation engine
-        if (status !== 'not_interested' && details.credits) {
-          const { saveDirectorsActors } = require('../../services/database');
-          const existing = await getItem(tmdbId);
-          if (existing) {
-            const people: any[] = [];
-            const directors = details.credits.crew?.filter(
-              (c: any) => c.job === 'Director'
-            ) || [];
-            const topActors = details.credits.cast?.slice(0, 5) || [];
-
-            directors.forEach((d: any) => {
-              people.push({
-                itemId: existing.id,
-                personId: d.id,
-                personName: d.name,
-                role: 'director',
-                profilePath: d.profile_path,
-              });
-            });
-            topActors.forEach((a: any) => {
-              people.push({
-                itemId: existing.id,
-                personId: a.id,
-                personName: a.name,
-                role: 'actor',
-                profilePath: a.profile_path,
-              });
-            });
-
-            if (people.length > 0) {
-              await saveDirectorsActors(existing.id, people);
-            }
-          }
+        if (status !== 'not_interested') {
+          await persistPeople();
         }
 
         if (status === 'watched') {
@@ -500,7 +615,7 @@ export default function DetailScreen() {
         console.error('Action error:', err);
       }
     },
-    [details, mediaType, tmdbId, itemStatus]
+    [details, mediaType, tmdbId, itemStatus, persistPeople]
   );
 
   const handleLogEpisode = useCallback(async () => {
@@ -511,7 +626,7 @@ export default function DetailScreen() {
       if (isNaN(seasonNum) || isNaN(epNum)) return;
 
       // Ensure item is in database
-      let existing = await getItem(tmdbId);
+      let existing = await getItem(tmdbId, mediaType);
       if (!existing) {
         await addItem({
           tmdbId: details.id,
@@ -529,7 +644,7 @@ export default function DetailScreen() {
           watchedDate: new Date().toISOString().split('T')[0],
         });
         setItemStatus('watched');
-        existing = await getItem(tmdbId);
+        existing = await getItem(tmdbId, mediaType);
       }
 
       if (existing) {
@@ -563,7 +678,7 @@ export default function DetailScreen() {
   const handleDeleteEpisodeRating = useCallback(async (epRatingId: number) => {
     try {
       await deleteEpisodeRating(epRatingId);
-      const existing = await getItem(tmdbId);
+      const existing = await getItem(tmdbId, mediaType);
       if (existing) {
         const epRatings = await getEpisodeRatings(existing.id);
         setEpisodeRatings(epRatings);
@@ -607,7 +722,7 @@ export default function DetailScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
     try {
-      let existing = await getItem(tmdbId);
+      let existing = await getItem(tmdbId, mediaType);
       if (!existing) {
         await addItem({
           tmdbId: details.id,
@@ -624,7 +739,7 @@ export default function DetailScreen() {
           status: 'watched',
           watchedDate: watchedDateStr,
         });
-        existing = await getItem(tmdbId);
+        existing = await getItem(tmdbId, mediaType);
       } else {
         await updateItem(existing.id, {
           status: 'watched',
@@ -646,16 +761,19 @@ export default function DetailScreen() {
         });
         setItemStatus('watched');
         setUserRating(overallRating);
-        if (Platform.OS === 'android') {
-          ToastAndroid.show('Rating saved successfully! 🍿', ToastAndroid.SHORT);
-        }
+
+        // Rating is the primary path into "watched" (quick-rate skips the
+        // status buttons entirely), so the people cache is refreshed here too.
+        await persistPeople();
+
+        showSnackbar('Rating saved 🍿');
       }
     } catch (err) {
       console.error('Rating error:', err);
     }
 
     setIsRatingMode(false);
-  }, [overallRating, plotRating, actingRating, visualsRating, soundtrackRating, rewatchability, selectedMood, reviewText, watchDay, watchMonth, watchYear, details, tmdbId, mediaType]);
+  }, [overallRating, plotRating, actingRating, visualsRating, soundtrackRating, rewatchability, selectedMood, reviewText, watchDay, watchMonth, watchYear, details, tmdbId, mediaType, persistPeople]);
 
   const handleCalendar = useCallback(async () => {
     if (!details) return;
@@ -727,7 +845,12 @@ export default function DetailScreen() {
           ]}
         >
           <Text style={[styles.errorText, { color: colors.secondary, marginTop: 0 }]}>Failed to load details</Text>
-          <TouchableOpacity onPress={handleClose} style={[styles.ratingCancelBtn, { borderColor: colors.border, marginTop: 16, maxWidth: 120 }]}>
+          <TouchableOpacity
+            onPress={handleClose}
+            style={[styles.ratingCancelBtn, { borderColor: colors.border, marginTop: 16, maxWidth: 120 }]}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          >
             <Text style={{ color: colors.text }}>Close</Text>
           </TouchableOpacity>
         </Animated.View>
@@ -815,12 +938,14 @@ export default function DetailScreen() {
     <View style={styles.overlayContainer}>
       <Pressable style={styles.modalBackdrop} onPress={handleClose} />
       <Animated.View
+        accessibilityViewIsModal
         style={[
           styles.sheet,
           {
-            backgroundColor: colors.bg,
+            backgroundColor: colors.surface,
+            height: windowHeight * 0.92,
             transform: [{ translateY: slideAnim }],
-            paddingBottom: insets.bottom || 16,
+            paddingBottom: insets.bottom || spacing.lg,
           },
         ]}
       >
@@ -833,21 +958,28 @@ export default function DetailScreen() {
           <View style={[styles.handleBar, { backgroundColor: colors.border }]} />
         </View>
 
-        {isRatingMode && (
-          <TouchableOpacity
-            style={styles.ratingBackBtn}
-            onPress={() => setIsRatingMode(false)}
-          >
-            <Ionicons name="arrow-back" size={22} color={colors.text} />
-          </TouchableOpacity>
-        )}
-        {!isRatingMode && (
-          <TouchableOpacity
-            style={[styles.sheetCloseBtn, { backgroundColor: 'rgba(0,0,0,0.5)' }]}
-            onPress={handleClose}
-          >
-            <Ionicons name="close" size={20} color="#FFFFFF" />
-          </TouchableOpacity>
+        {isRatingMode ? (
+          <View style={styles.ratingBackBtn}>
+            <IconButton
+              icon="arrow-back"
+              onPress={() => setIsRatingMode(false)}
+              accessibilityLabel="Back to details"
+            />
+          </View>
+        ) : (
+          /* Sits over the backdrop image, so it keeps a fixed scrim rather
+             than a theme colour that could vanish against bright artwork. */
+          <View style={styles.sheetCloseBtn}>
+            <IconButton
+              icon="close"
+              onPress={handleClose}
+              color="#FFFFFF"
+              size={40}
+              iconSize={22}
+              style={{ backgroundColor: 'rgba(0,0,0,0.55)' }}
+              accessibilityLabel="Close"
+            />
+          </View>
         )}
 
         {isRatingMode ? (
@@ -877,6 +1009,9 @@ export default function DetailScreen() {
                   ]}
                   onPress={handleSetToday}
                   activeOpacity={0.7}
+                  accessibilityRole="radio"
+                  accessibilityLabel="Watched today"
+                  accessibilityState={{ selected: isTodaySelected, checked: isTodaySelected }}
                 >
                   <Text style={[styles.ratingDatePresetText, { color: colors.secondary }, isTodaySelected && { color: colors.accent, fontWeight: '600' }]}>Today</Text>
                 </TouchableOpacity>
@@ -888,6 +1023,9 @@ export default function DetailScreen() {
                   ]}
                   onPress={handleSetYesterday}
                   activeOpacity={0.7}
+                  accessibilityRole="radio"
+                  accessibilityLabel="Watched yesterday"
+                  accessibilityState={{ selected: isYesterdaySelected, checked: isYesterdaySelected }}
                 >
                   <Text style={[styles.ratingDatePresetText, { color: colors.secondary }, isYesterdaySelected && { color: colors.accent, fontWeight: '600' }]}>Yesterday</Text>
                 </TouchableOpacity>
@@ -932,7 +1070,7 @@ export default function DetailScreen() {
                 </View>
               </View>
               {dateError && (
-                <Text style={[styles.ratingErrorText, { color: '#EF4444' }]}>
+                <Text style={[styles.ratingErrorText, { color: colors.error }]} accessibilityLiveRegion="polite">
                   {dateError}
                 </Text>
               )}
@@ -982,6 +1120,9 @@ export default function DetailScreen() {
                       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                     }}
                     activeOpacity={0.7}
+                    accessibilityRole="radio"
+                    accessibilityLabel={label}
+                    accessibilityState={{ selected: selectedMood === emoji, checked: selectedMood === emoji }}
                   >
                     <Text style={styles.ratingMoodEmoji}>{emoji}</Text>
                     <Text style={[
@@ -1217,20 +1358,35 @@ export default function DetailScreen() {
               </View>
             ) : aiInsight ? (
               <View style={styles.aiInsightRow}>
-                <View style={[
-                  styles.aiMatchScoreBadge,
-                  { backgroundColor: aiInsight.matchScore >= 80 ? '#10b98122' : aiInsight.matchScore >= 50 ? '#f59e0b22' : '#6b728022' }
-                ]}>
-                  <Text style={[
-                    styles.aiMatchScoreText,
-                    { color: aiInsight.matchScore >= 80 ? '#10b981' : aiInsight.matchScore >= 50 ? '#f59e0b' : '#9ca3af' }
-                  ]}>
+                <View
+                  style={[
+                    styles.aiMatchScoreBadge,
+                    {
+                      backgroundColor:
+                        aiInsight.matchScore >= 80
+                          ? colors.primaryContainer
+                          : aiInsight.matchScore >= 50
+                            ? colors.tertiaryContainer
+                            : colors.surfaceContainerHighest,
+                    },
+                  ]}
+                  accessible
+                  accessibilityLabel={`${aiInsight.matchScore} percent taste match`}
+                >
+                  <Text
+                    style={[
+                      styles.aiMatchScoreText,
+                      { color: matchScoreColor(aiInsight.matchScore) },
+                    ]}
+                  >
                     {aiInsight.matchScore}%
                   </Text>
-                  <Text style={[
-                    styles.aiMatchScoreLabel,
-                    { color: aiInsight.matchScore >= 80 ? '#10b981' : aiInsight.matchScore >= 50 ? '#f59e0b' : '#9ca3af' }
-                  ]}>
+                  <Text
+                    style={[
+                      styles.aiMatchScoreLabel,
+                      { color: matchScoreColor(aiInsight.matchScore) },
+                    ]}
+                  >
                     Match
                   </Text>
                 </View>
@@ -1258,6 +1414,9 @@ export default function DetailScreen() {
                 itemStatus === 'watched' && { borderColor: colors.accent, backgroundColor: colors.accentMuted },
               ]}
               onPress={() => handleAction('watched')}
+              accessibilityRole="togglebutton"
+              accessibilityLabel="Mark as watched"
+              accessibilityState={{ selected: itemStatus === 'watched' }}
             >
               <Ionicons
                 name={itemStatus === 'watched' ? 'checkmark-circle' : 'checkmark-circle-outline'}
@@ -1304,6 +1463,9 @@ export default function DetailScreen() {
             <TouchableOpacity
               style={[styles.actionButton, { backgroundColor: colors.elevated, borderColor: colors.border }]}
               onPress={() => setIsRatingMode(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Rate and log"
+              accessibilityHint="Opens the rating form"
             >
               <Ionicons name="star-outline" size={20} color={colors.accent} />
               <Text style={[styles.actionButtonText, { color: colors.text }]}>Rate</Text>
@@ -1317,8 +1479,11 @@ export default function DetailScreen() {
             <TouchableOpacity
               style={[styles.actionButton, { backgroundColor: colors.elevated, borderColor: colors.border }]}
               onPress={openTrailer}
+              accessibilityRole="link"
+              accessibilityLabel="Watch trailer"
+              accessibilityHint="Opens YouTube"
             >
-              <Ionicons name="logo-youtube" size={20} color="#FF0000" />
+              <Ionicons name="logo-youtube" size={20} color={YOUTUBE_RED} />
               <Text style={[styles.actionButtonText, { color: colors.text }]}>Trailer</Text>
             </TouchableOpacity>
           )}
@@ -1329,8 +1494,11 @@ export default function DetailScreen() {
               const query = encodeURIComponent(`${details.title} ${mediaType === 'tv' ? 'soundtrack' : 'OST album'}`);
               Linking.openURL(`https://music.youtube.com/search?q=${query}`);
             }}
+            accessibilityRole="link"
+            accessibilityLabel="Find the soundtrack"
+            accessibilityHint="Opens YouTube Music"
           >
-            <Ionicons name="musical-notes" size={20} color="#FF0000" />
+            <Ionicons name="musical-notes" size={20} color={YOUTUBE_RED} />
             <Text style={[styles.actionButtonText, { color: colors.text }]}>Soundtrack</Text>
           </TouchableOpacity>
 
@@ -1342,6 +1510,10 @@ export default function DetailScreen() {
             ]}
             onPress={() => handleAction('not_interested')}
             activeOpacity={0.7}
+            accessibilityRole="togglebutton"
+            accessibilityLabel="Not interested"
+            accessibilityHint="Hides this title from recommendations"
+            accessibilityState={{ selected: itemStatus === 'not_interested' }}
           >
             <Ionicons
               name={itemStatus === 'not_interested' ? 'eye-off' : 'eye-off-outline'}
@@ -1365,6 +1537,8 @@ export default function DetailScreen() {
           <TouchableOpacity
             style={[styles.calendarRow, { backgroundColor: colors.accentMuted, borderColor: colors.accent }]}
             onPress={handleCalendar}
+            accessibilityRole="button"
+            accessibilityLabel="Add release to calendar"
           >
             <Ionicons name="calendar-outline" size={18} color={colors.accent} />
             <Text style={[styles.calendarText, { color: colors.accent }]}>Add release to calendar</Text>
@@ -1517,6 +1691,9 @@ export default function DetailScreen() {
                       setActiveSeasonNumber(season.season_number);
                       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                     }}
+                    accessibilityRole="tab"
+                    accessibilityLabel={season.name || `Season ${season.season_number}`}
+                    accessibilityState={{ selected: isActive }}
                   >
                     <Text
                       style={[
@@ -1553,11 +1730,19 @@ export default function DetailScreen() {
                           if (!isFuture) {
                             setSeasonInput(String(activeSeasonNumber));
                             setEpisodeInput(String(ep.episode_number));
-                            if (Platform.OS === 'android') {
-                              ToastAndroid.show(`Selected S${activeSeasonNumber} E${ep.episode_number} for logging`, ToastAndroid.SHORT);
-                            }
+                            showSnackbar(
+                              `Selected S${activeSeasonNumber} E${ep.episode_number} for logging`
+                            );
                           }
                         }}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Season ${activeSeasonNumber}, episode ${ep.episode_number}${
+                          ep.name ? `, ${ep.name}` : ''
+                        }${userEpRating ? `, your rating ${userEpRating} out of 10` : ''}${
+                          isFuture ? ', not yet aired' : ''
+                        }`}
+                        accessibilityHint={isFuture ? undefined : 'Selects this episode for logging'}
+                        accessibilityState={{ disabled: isFuture }}
                       >
                         {/* Still Image */}
                         <View style={styles.epStillContainer}>
@@ -1665,10 +1850,33 @@ export default function DetailScreen() {
                   <TouchableOpacity
                     style={[styles.stepperBtn, { borderColor: colors.border, backgroundColor: colors.bg }]}
                     onPress={() => setEpisodeRatingInput((prev) => Math.max(1, prev - 0.5))}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Decrease episode rating"
                   >
-                    <Text style={[styles.stepperBtnText, { color: colors.text }]}>-</Text>
+                    <Text style={[styles.stepperBtnText, { color: colors.text }]}>−</Text>
                   </TouchableOpacity>
-                  <View style={styles.ratingValueBox}>
+                  <View
+                    style={styles.ratingValueBox}
+                    accessible
+                    accessibilityRole="adjustable"
+                    accessibilityLabel="Episode rating"
+                    accessibilityValue={{
+                      min: 1,
+                      max: 10,
+                      now: episodeRatingInput,
+                      text: `${episodeRatingInput.toFixed(1)} out of 10`,
+                    }}
+                    accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+                    onAccessibilityAction={(event) => {
+                      if (event.nativeEvent.actionName === 'increment') {
+                        setEpisodeRatingInput((prev) => Math.min(10, prev + 0.5));
+                      }
+                      if (event.nativeEvent.actionName === 'decrement') {
+                        setEpisodeRatingInput((prev) => Math.max(1, prev - 0.5));
+                      }
+                    }}
+                  >
                     <Text style={[styles.ratingValueText, { color: colors.accent }]}>
                       ★ {episodeRatingInput.toFixed(1)}
                     </Text>
@@ -1676,6 +1884,9 @@ export default function DetailScreen() {
                   <TouchableOpacity
                     style={[styles.stepperBtn, { borderColor: colors.border, backgroundColor: colors.bg }]}
                     onPress={() => setEpisodeRatingInput((prev) => Math.min(10, prev + 0.5))}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Increase episode rating"
                   >
                     <Text style={[styles.stepperBtnText, { color: colors.text }]}>+</Text>
                   </TouchableOpacity>
@@ -1705,6 +1916,9 @@ export default function DetailScreen() {
                 ]}
                 onPress={handleLogEpisode}
                 disabled={isLogEpisodeDisabled}
+                accessibilityRole="button"
+                accessibilityLabel="Log episode"
+                accessibilityState={{ disabled: isLogEpisodeDisabled, busy: isLoggingEpisode }}
               >
                 {isLoggingEpisode ? (
                   <ActivityIndicator size="small" color={colors.bg} />
@@ -1742,10 +1956,12 @@ export default function DetailScreen() {
                         </Text>
                         <TouchableOpacity
                           onPress={() => handleDeleteEpisodeRating(ep.id)}
-                          hitSlop={8}
+                          hitSlop={16}
                           style={styles.deleteEpBtn}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Delete log for season ${ep.seasonNumber} episode ${ep.episodeNumber}`}
                         >
-                          <Ionicons name="trash-outline" size={14} color="#EF4444" />
+                          <Ionicons name="trash-outline" size={14} color={colors.error} />
                         </TouchableOpacity>
                       </View>
                       <Text style={[styles.loggedEpisodeRating, { color: colors.accent }]}>
@@ -1792,6 +2008,12 @@ export default function DetailScreen() {
         )}
         </KeyboardAvoidingView>
       </Animated.View>
+
+      <Snackbar
+        visible={!!snackbar}
+        message={snackbar ?? ''}
+        onDismiss={() => setSnackbar(null)}
+      />
     </View>
   );
 }
@@ -1809,9 +2031,8 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFill,
   },
   sheet: {
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    height: SCREEN_HEIGHT * 0.9,
+    borderTopLeftRadius: shape.extraLarge,
+    borderTopRightRadius: shape.extraLarge,
     overflow: 'hidden',
   },
   sheetHeaderContainer: {
@@ -1828,24 +2049,14 @@ const styles = StyleSheet.create({
   },
   sheetCloseBtn: {
     position: 'absolute',
-    top: 18,
-    right: 16,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
+    top: spacing.md,
+    right: spacing.sm,
     zIndex: 20,
   },
   ratingBackBtn: {
     position: 'absolute',
-    top: 18,
-    left: 16,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
+    top: spacing.sm,
+    left: spacing.xs,
     zIndex: 20,
   },
   ratingScroll: {

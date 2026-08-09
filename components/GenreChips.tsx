@@ -1,6 +1,7 @@
 import React from 'react';
-import { View, Text, ScrollView, Pressable, StyleSheet } from 'react-native';
-import { useTheme } from '../context/ThemeContext';
+import { ScrollView, StyleSheet } from 'react-native';
+import { spacing } from '../constants/m3';
+import Chip from './m3/Chip';
 
 export interface Genre {
   id: number;
@@ -11,67 +12,52 @@ interface GenreChipsProps {
   genres: Genre[];
   selectedIds: number[];
   onToggle: (id: number) => void;
+  /** Horizontal page gutter, so the rail lines up with the rest of the screen. */
+  gutter?: number;
 }
 
+/**
+ * Horizontally scrolling row of Material 3 filter chips.
+ *
+ * Each chip is an independent toggle, so they are exposed as checkboxes and a
+ * selected one gains a checkmark — the state survives both a screen reader and
+ * colour-blind viewing, which a fill-colour change alone does not.
+ */
 export default function GenreChips({
   genres,
   selectedIds,
   onToggle,
+  gutter = spacing.lg,
 }: GenreChipsProps) {
-  const { colors } = useTheme();
-
   return (
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
-      contentContainerStyle={styles.scrollContent}
+      contentContainerStyle={[styles.content, { paddingHorizontal: gutter }]}
+      accessibilityLabel="Filter by genre"
     >
-      {genres.map((genre) => {
-        const isSelected = selectedIds.includes(genre.id);
-        return (
-          <Pressable
-            key={genre.id}
-            onPress={() => onToggle(genre.id)}
-            style={[
-              styles.chip,
-              {
-                borderColor: isSelected ? colors.accent : colors.border,
-                backgroundColor: isSelected ? colors.accent : 'transparent',
-              },
-            ]}
-          >
-            <Text
-              style={[
-                styles.chipText,
-                {
-                  color: isSelected ? colors.bg : colors.secondary,
-                },
-              ]}
-            >
-              {genre.name}
-            </Text>
-          </Pressable>
-        );
-      })}
+      {genres.map((genre) => (
+        <Chip
+          key={genre.id}
+          label={genre.name}
+          variant="filter"
+          selected={selectedIds.includes(genre.id)}
+          onPress={() => onToggle(genre.id)}
+          accessibilityHint={
+            selectedIds.includes(genre.id)
+              ? `Removes the ${genre.name} filter`
+              : `Filters results to ${genre.name}`
+          }
+        />
+      ))}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  scrollContent: {
-    paddingHorizontal: 16,
-    gap: 8,
+  content: {
+    gap: spacing.sm,
     flexDirection: 'row',
     alignItems: 'center',
-  },
-  chip: {
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  chipText: {
-    fontSize: 13,
-    fontWeight: '500',
   },
 });

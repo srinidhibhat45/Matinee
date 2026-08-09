@@ -1,32 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Stack, router } from 'expo-router';
-import { StatusBar, View, ActivityIndicator, Platform, Text, TouchableOpacity } from 'react-native';
+import { StatusBar, View, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import { Loading } from '../components/m3';
 import { initDatabase, performFullSync, getPreference, setPreference } from '../services/database';
 import { notificationService } from '../services/notifications';
 import { cloudSync } from '../services/cloudSync';
 import { isFirebaseConfigured, bindKeys, lookupKey, tmdbService } from '../services';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ThemeProvider, useTheme } from '../context/ThemeContext';
+import UpdateBanner from '../components/UpdateBanner';
 
 function RootLayoutContent({ isReady }: { isReady: boolean }) {
   const { colors, isDark } = useTheme();
-  const [showWebPrompt, setShowWebPrompt] = useState(false);
-
-  useEffect(() => {
-    if (Platform.OS === 'web') {
-      const checkWidth = () => {
-        if (window.innerWidth > 768) {
-          setShowWebPrompt(true);
-        } else {
-          setShowWebPrompt(false);
-        }
-      };
-      checkWidth();
-      window.addEventListener('resize', checkWidth);
-      return () => window.removeEventListener('resize', checkWidth);
-    }
-  }, []);
 
   useEffect(() => {
     if (!isReady || Platform.OS === 'web') return;
@@ -69,8 +55,15 @@ function RootLayoutContent({ isReady }: { isReady: boolean }) {
 
   if (!isReady) {
     return (
-      <View style={{ flex: 1, backgroundColor: colors.bg, justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color={colors.accent} />
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: colors.background,
+          justifyContent: 'center',
+          alignItems: 'center',
+        }}
+      >
+        <Loading label="Starting Matinee" size="large" />
       </View>
     );
   }
@@ -79,12 +72,12 @@ function RootLayoutContent({ isReady }: { isReady: boolean }) {
     <>
       <StatusBar
         barStyle={isDark ? 'light-content' : 'dark-content'}
-        backgroundColor={colors.bg}
+        backgroundColor={colors.background}
       />
       <Stack
         screenOptions={{
           headerShown: false,
-          contentStyle: { backgroundColor: colors.bg },
+          contentStyle: { backgroundColor: colors.background },
           animation: 'slide_from_right',
         }}
       >
@@ -100,34 +93,8 @@ function RootLayoutContent({ isReady }: { isReady: boolean }) {
         />
       </Stack>
 
-      {showWebPrompt && (
-        <View style={{
-          position: 'absolute',
-          bottom: 24,
-          right: 24,
-          backgroundColor: '#141416',
-          borderColor: 'rgba(255, 255, 255, 0.08)',
-          borderWidth: 1,
-          padding: 16,
-          borderRadius: 16,
-          maxWidth: 320,
-          zIndex: 99999,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 4 },
-          shadowOpacity: 0.3,
-          shadowRadius: 8,
-        }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 15 }}>🖥️ Mobile View Recommended</Text>
-            <TouchableOpacity onPress={() => setShowWebPrompt(false)}>
-              <Text style={{ color: '#9CA3AF', fontSize: 18, fontWeight: 'bold', paddingLeft: 8 }}>✕</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={{ color: '#9CA3AF', fontSize: 12, lineHeight: 17 }}>
-            This app is optimized for phone viewports. For the best experience, please resize your browser window to a mobile width or toggle mobile emulation in DevTools (F12).
-          </Text>
-        </View>
-      )}
+      <UpdateBanner />
+
     </>
   );
 }

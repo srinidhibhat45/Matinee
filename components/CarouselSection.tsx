@@ -1,6 +1,9 @@
 import React, { useCallback } from 'react';
-import { View, Text, FlatList, StyleSheet, Pressable } from 'react-native';
+import { FlatList, StyleSheet, View } from 'react-native';
+import { spacing } from '../constants/m3';
 import { useTheme } from '../context/ThemeContext';
+import { useResponsive } from '../hooks/useResponsive';
+import { Button, Text } from './m3';
 import MovieCard, { MovieCardItem } from './MovieCard';
 
 interface CarouselSectionProps {
@@ -14,6 +17,18 @@ interface CarouselSectionProps {
   showMediaTypeBadge?: boolean;
 }
 
+/** Cards grow with the window so wide layouts don't show a row of tiny posters. */
+const CARD_WIDTH = {
+  compact: { small: 112, medium: 144, large: 168 },
+  wide: { small: 132, medium: 168, large: 200 },
+} as const;
+
+/**
+ * A titled, horizontally scrolling rail of poster cards.
+ *
+ * The heading is a real accessibility header, so screen-reader users can jump
+ * between rails instead of swiping through every card in one.
+ */
 export default function CarouselSection({
   title,
   items,
@@ -25,6 +40,8 @@ export default function CarouselSection({
   showMediaTypeBadge = false,
 }: CarouselSectionProps) {
   const { colors } = useTheme();
+  const { isCompact, gutter } = useResponsive();
+  const width = CARD_WIDTH[isCompact ? 'compact' : 'wide'][cardSize];
 
   const renderItem = useCallback(
     ({ item }: { item: MovieCardItem }) => (
@@ -32,12 +49,12 @@ export default function CarouselSection({
         item={item}
         onPress={onItemPress}
         onLongPress={onItemLongPress}
-        size={cardSize}
+        width={width}
         showRating={showRating}
         showMediaTypeBadge={showMediaTypeBadge}
       />
     ),
-    [onItemPress, onItemLongPress, cardSize, showRating, showMediaTypeBadge]
+    [onItemPress, onItemLongPress, width, showRating, showMediaTypeBadge]
   );
 
   const keyExtractor = useCallback(
@@ -45,15 +62,31 @@ export default function CarouselSection({
     []
   );
 
+  if (items.length === 0) return null;
+
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
-        {onSeeAll && (
-          <Pressable onPress={onSeeAll} hitSlop={8}>
-            <Text style={[styles.seeAll, { color: colors.accent }]}>See All →</Text>
-          </Pressable>
-        )}
+      <View style={[styles.header, { paddingHorizontal: gutter }]}>
+        <Text
+          variant="titleLarge"
+          color={colors.onSurface}
+          accessibilityRole="header"
+          style={styles.title}
+          numberOfLines={1}
+        >
+          {title}
+        </Text>
+        {onSeeAll ? (
+          <Button
+            label="See all"
+            variant="text"
+            size="small"
+            icon="chevron-forward"
+            trailingIcon
+            onPress={onSeeAll}
+            accessibilityLabel={`See all ${title}`}
+          />
+        ) : null}
       </View>
 
       <FlatList
@@ -62,41 +95,30 @@ export default function CarouselSection({
         keyExtractor={keyExtractor}
         horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.listContent}
-        ItemSeparatorComponent={Separator}
+        contentContainerStyle={{ paddingHorizontal: gutter, gap: spacing.md }}
+        // Rails are long; windowing keeps scrolling smooth on low-end devices.
+        initialNumToRender={6}
+        maxToRenderPerBatch={6}
+        windowSize={5}
+        removeClippedSubviews
       />
     </View>
   );
 }
 
-function Separator() {
-  return <View style={styles.separator} />;
-}
-
 const styles = StyleSheet.create({
   container: {
-    marginBottom: 24,
+    marginBottom: spacing.xl,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 12,
+    marginBottom: spacing.md,
+    gap: spacing.sm,
+    minHeight: 40,
   },
   title: {
-    fontSize: 18,
-    fontWeight: '600',
-  },
-  seeAll: {
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  listContent: {
-    paddingLeft: 16,
-    paddingRight: 16,
-  },
-  separator: {
-    width: 12,
+    flexShrink: 1,
   },
 });

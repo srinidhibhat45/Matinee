@@ -1,7 +1,5 @@
 import React from 'react';
-import { Text, Pressable, StyleSheet } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useTheme } from '../context/ThemeContext';
+import { Button } from './m3';
 import { calendarService } from '../services/calendar';
 
 interface CalendarButtonProps {
@@ -17,40 +15,14 @@ export default function CalendarButton({
   overview,
   genres,
 }: CalendarButtonProps) {
-  const { colors } = useTheme();
-
-  const handlePress = async () => {
-    await calendarService.addToCalendar(title, date, overview, genres);
-  };
-
   return (
-    <Pressable onPress={handlePress} style={[styles.button, { borderColor: colors.accent }]}>
-      <Ionicons
-        name="calendar-outline"
-        size={16}
-        color={colors.accent}
-        style={styles.icon}
-      />
-      <Text style={[styles.text, { color: colors.accent }]}>Add to Calendar</Text>
-    </Pressable>
+    <Button
+      label="Add to calendar"
+      icon="calendar-outline"
+      variant="outlined"
+      size="small"
+      onPress={() => calendarService.addToCalendar(title, date, overview, genres)}
+      accessibilityLabel={`Add ${title} to your calendar`}
+    />
   );
 }
-
-const styles = StyleSheet.create({
-  button: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    height: 36,
-    alignSelf: 'flex-start',
-  },
-  icon: {
-    marginRight: 6,
-  },
-  text: {
-    fontSize: 13,
-    fontWeight: '500',
-  },
-});

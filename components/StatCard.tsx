@@ -1,11 +1,9 @@
 import React from 'react';
-import { View, Text, StyleSheet, Dimensions, TouchableOpacity } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { shape, spacing } from '../constants/m3';
 import { useTheme } from '../context/ThemeContext';
-
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-// Screen horizontal padding: 16 * 2 = 32. Column gap: 10.
-const CARD_WIDTH = (SCREEN_WIDTH - 32 - 10) / 2;
+import { Card, Text } from './m3';
 
 interface StatCardProps {
   label: string;
@@ -13,53 +11,69 @@ interface StatCardProps {
   icon: string;
   color?: string;
   onPress?: () => void;
+  /** Set by the responsive grid; omit to let the card fill its parent. */
+  width?: number;
 }
 
+/**
+ * A single metric tile.
+ *
+ * Value and label are combined into one accessibility label ("42 films
+ * watched") because reading them as two nodes — "42", then "Films watched" —
+ * loses the connection between them.
+ */
 export default function StatCard({
   label,
   value,
   icon,
   color,
   onPress,
+  width,
 }: StatCardProps) {
   const { colors } = useTheme();
-  const iconColor = color || colors.accent;
-
-  const CardContainer = onPress ? TouchableOpacity : View;
+  const iconColor = color ?? colors.primary;
 
   return (
-    <CardContainer
+    <Card
+      variant="filled"
       onPress={onPress}
-      activeOpacity={0.8}
-      style={[styles.card, { width: CARD_WIDTH, backgroundColor: colors.card, borderColor: colors.border }]}
+      radius={shape.large}
+      style={[styles.card, width ? { width } : styles.flexible]}
+      accessibilityLabel={`${value} ${label}`}
+      accessibilityHint={onPress ? `Opens ${label}` : undefined}
     >
-      <Ionicons
-        name={icon as any}
-        size={22}
-        color={iconColor}
-        style={styles.icon}
-      />
-      <Text style={[styles.value, { color: colors.text }]}>{value}</Text>
-      <Text style={[styles.label, { color: colors.secondary }]}>{label}</Text>
-    </CardContainer>
+      <View style={styles.body}>
+        <View style={[styles.iconCircle, { backgroundColor: colors.surfaceContainerLow }]}>
+          <Ionicons name={icon as any} size={20} color={iconColor} />
+        </View>
+        <Text variant="headlineSmall" color={colors.onSurface} numberOfLines={1}>
+          {value}
+        </Text>
+        <Text variant="bodyMedium" color={colors.onSurfaceVariant} numberOfLines={2}>
+          {label}
+        </Text>
+      </View>
+    </Card>
   );
 }
 
 const styles = StyleSheet.create({
   card: {
-    borderRadius: 14,
-    borderWidth: 1,
-    padding: 16,
+    minHeight: 132,
   },
-  icon: {
-    marginBottom: 12,
+  flexible: {
+    flex: 1,
   },
-  value: {
-    fontSize: 28,
-    fontWeight: '700',
-    marginBottom: 4,
+  body: {
+    padding: spacing.lg,
+    gap: spacing.xs,
   },
-  label: {
-    fontSize: 13,
+  iconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: shape.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.sm,
   },
 });

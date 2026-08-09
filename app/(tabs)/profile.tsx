@@ -1,20 +1,14 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import Constants from 'expo-constants';
 import {
   View,
-  Text,
   StyleSheet,
-  TouchableOpacity,
   FlatList,
   Image,
-  TextInput,
   Alert,
   RefreshControl,
   Platform,
-  Dimensions,
-  ActivityIndicator,
   ScrollView,
-  Modal,
-  Pressable,
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -25,7 +19,24 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
+import { useResponsive, gridItemWidth } from '../../hooks/useResponsive';
+import { shape, spacing, withAlpha } from '../../constants/m3';
+import {
+  BottomSheet,
+  Button,
+  Card,
+  Chip,
+  Dialog,
+  Divider,
+  IconButton,
+  ListItem,
+  SegmentedButtons,
+  Text,
+  TextField,
+  NAVIGATION_BAR_HEIGHT,
+} from '../../components/m3';
 import ThemeSwitch from '../../components/ThemeSwitch';
+import EmptyState from '../../components/EmptyState';
 import { getImageUrl, tmdbService } from '../../services/tmdb';
 import {
   exportUserData,
@@ -39,6 +50,14 @@ import {
   deleteItem,
 } from '../../services/database';
 import { cloudSync } from '../../services/cloudSync';
+import { notificationService } from '../../services/notifications';
+import {
+  applyUpdate,
+  checkForUpdate,
+  downloadUpdate,
+  getCurrentUpdateInfo,
+  isUpdateSupported,
+} from '../../services/updates';
 import { isFirebaseConfigured, bindKeys, lookupKey, handleKeyAutofill } from '../../services';
 import { WatchedItem, ItemStatus, MediaType } from '../../types';
 import { LANGUAGES, DEFAULT_LANGUAGES } from '../../constants/languages';
@@ -47,8 +66,8 @@ import { OTT_PROVIDERS } from '../../constants/providers';
 
 type LibraryTab = 'watchlist' | 'watched';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const CARD_WIDTH = (SCREEN_WIDTH - 32 - 12) / 3; // 32px padding + 2×6px gaps
+/** Gap between poster tiles in the library grid. */
+const GRID_GAP = spacing.md;
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -56,6 +75,18 @@ export default function ProfileScreen() {
   const { tab, mediaType } = useLocalSearchParams<{ tab?: string; mediaType?: string }>();
   const { colors, isDark } = useTheme();
   const insets = useSafeAreaInsets();
+  const { width, gutter, posterColumns, isCompact } = useResponsive();
+
+  // Tile width is recomputed from the live window so the grid reflows on
+  // rotation and on wide screens instead of being fixed at import time.
+  const gridCardWidth = useMemo(
+    () => gridItemWidth(width, posterColumns, gutter, GRID_GAP),
+    [width, posterColumns, gutter]
+  );
+  const gridPosterHeight = Math.round(gridCardWidth * 1.5);
+
+  const bottomPadding =
+    (isCompact ? NAVIGATION_BAR_HEIGHT + insets.bottom : insets.bottom) + 88;
   const [activeTab, setActiveTab] = useState<LibraryTab>('watchlist');
   const [filterMediaType, setFilterMediaType] = useState<MediaType | null>(null);
   const [items, setItems] = useState<WatchedItem[]>([]);
@@ -174,6 +205,8 @@ export default function ProfileScreen() {
 
       if (action === 'remove') {
         await deleteItem(longPressItem.id);
+        // Removing a watchlisted title must also drop its release reminders.
+        await notificationService.cancelReminder(tmdbId, mediaType);
       } else if (action === 'not_interested') {
         await addItem({
           tmdbId,
@@ -216,6 +249,82 @@ export default function ProfileScreen() {
   const [syncBusy, setSyncBusy] = useState(false);
   const [lastSyncDisplay, setLastSyncDisplay] = useState<string | null>(null);
   const [resetBusy, setResetBusy] = useState(false);
+
+  // OTA update states
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateReadyToApply, setUpdateReadyToApply] = useState(false);
+  const [updateStatusText, setUpdateStatusText] = useState(
+    isUpdateSupported()
+      ? 'Check whether a newer version is available.'
+      : 'Over-the-air updates are unavailable in this build.'
+  );
+
+  const appVersion = (Constants.expoConfig?.version as string) || '1.0.0';
+
+  /**
+   * Describes the running bundle.
+   *
+   * The channel is included deliberately: a binary built without one can never
+   * receive an over-the-air update, and that failure is otherwise completely
+   * silent — the app just reports "up to date" forever.
+   */
+  const buildLabel = useMemo(() => {
+    const info = getCurrentUpdateInfo();
+    if (!isUpdateSupported()) return 'development build';
+
+    const origin = info.isEmbedded
+      ? 'base build'
+      : `OTA update · ${
+          info.createdAt
+            ? info.createdAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+            : 'unknown date'
+        }`;
+
+    return info.channel ? `${origin} · ${info.channel}` : `${origin} · no channel`;
+  }, []);
+
+  const handleCheckForUpdates = useCallback(async () => {
+    setUpdateBusy(true);
+    try {
+      const result = await checkForUpdate();
+
+      if (result.status === 'unavailable') {
+        setUpdateStatusText(result.reason);
+        return;
+      }
+      if (result.status === 'error') {
+        setUpdateStatusText(`Could not check for updates: ${result.error}`);
+        return;
+      }
+      if (result.status === 'up-to-date') {
+        setUpdateStatusText("You're on the latest version.");
+        return;
+      }
+
+      setUpdateStatusText('Downloading update...');
+      const download = await downloadUpdate();
+      if (download.status === 'ready') {
+        setUpdateReadyToApply(true);
+        setUpdateStatusText('Update downloaded. Restart to apply it.');
+      } else if (download.status === 'up-to-date') {
+        setUpdateStatusText("You're on the latest version.");
+      } else {
+        setUpdateStatusText(`Download failed: ${download.error}`);
+      }
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, []);
+
+  const handleApplyUpdate = useCallback(async () => {
+    setUpdateBusy(true);
+    try {
+      await applyUpdate();
+    } catch {
+      setUpdateStatusText('Could not restart. Please close and reopen the app.');
+      setUpdateBusy(false);
+    }
+  }, []);
 
   // Sync tab/mediaType search params if they are passed
   useEffect(() => {
@@ -671,8 +780,8 @@ export default function ProfileScreen() {
 
   const renderLibraryItem = useCallback(
     ({ item }: { item: WatchedItem }) => {
-      const isFuture = item.releaseDate && new Date(item.releaseDate) > new Date();
-      
+      const isFuture = !!item.releaseDate && new Date(item.releaseDate) > new Date();
+
       let releaseText = '';
       if (item.releaseDate) {
         if (isFuture) {
@@ -688,681 +797,567 @@ export default function ProfileScreen() {
         }
       }
 
+      const type = item.mediaType || (item.releaseDate ? 'movie' : 'tv');
+      const typeLabel = type === 'tv' ? 'Series' : 'Movie';
+      const ratingLabel = item.userRating
+        ? `Your rating ${item.userRating.toFixed(1)} out of 10`
+        : item.voteAverage > 0
+          ? `Rated ${item.voteAverage.toFixed(1)} out of 10`
+          : null;
+
       return (
-        <TouchableOpacity
-          style={styles.gridCard}
+        <Card
+          variant="filled"
+          radius={shape.medium}
           onPress={() => handleItemPress(item)}
           onLongPress={() => handleLibraryItemLongPress(item)}
-          activeOpacity={0.8}
+          style={{ width: gridCardWidth, backgroundColor: 'transparent' }}
+          accessibilityLabel={[item.title, typeLabel, releaseText, ratingLabel]
+            .filter(Boolean)
+            .join(', ')}
+          accessibilityHint="Double tap to open. Long press for quick actions."
         >
-          <View style={[styles.gridPosterContainer, { backgroundColor: colors.card }]}>
+          <View
+            style={[
+              styles.gridPosterWrap,
+              { height: gridPosterHeight, backgroundColor: colors.surfaceContainerHighest },
+            ]}
+          >
             {item.posterPath ? (
               <Image
-                source={{ uri: getImageUrl(item.posterPath, 'w185') || "" }}
-                style={styles.gridPoster}
+                source={{ uri: getImageUrl(item.posterPath, 'w342') || '' }}
+                style={styles.fill}
+                resizeMode="cover"
+                accessible={false}
               />
             ) : (
-              <View style={[styles.gridPoster, styles.posterPlaceholder, { backgroundColor: colors.elevated }]}>
-                <Ionicons name="film-outline" size={24} color={colors.muted} />
+              <View style={[styles.fill, styles.center]}>
+                <Ionicons name="film-outline" size={24} color={colors.onSurfaceVariant} />
               </View>
             )}
-            
-            {/* Show user rating if available, otherwise fallback to TMDB rating */}
+
+            {/* A rating the user set outranks the TMDB average. */}
             {item.userRating ? (
-              <View style={[styles.gridRating, { backgroundColor: colors.accent }]}>
-                <Text style={[styles.gridRatingText, { color: colors.bg }]}>
-                  ★ {item.userRating.toFixed(1)}
+              <View style={[styles.ratingBadge, { backgroundColor: colors.primary }]}>
+                <Ionicons name="star" size={10} color={colors.onPrimary} />
+                <Text variant="labelSmall" color={colors.onPrimary} maxFontSizeMultiplier={1.2}>
+                  {item.userRating.toFixed(1)}
                 </Text>
               </View>
             ) : item.voteAverage > 0 ? (
-              <View style={styles.gridRating}>
-                <Text style={[styles.gridRatingText, { color: colors.accent }]}>
-                  ★ {item.voteAverage.toFixed(1)}
+              <View style={styles.ratingBadgeScrim}>
+                <Ionicons name="star" size={10} color={SCRIM_ON} />
+                <Text variant="labelSmall" color={SCRIM_ON} maxFontSizeMultiplier={1.2}>
+                  {item.voteAverage.toFixed(1)}
                 </Text>
               </View>
             ) : null}
-            {(() => {
-              const type = item.mediaType || (item.releaseDate ? 'movie' : 'tv');
-              return (
-                <View style={[styles.gridMediaBadge, { backgroundColor: 'rgba(10, 10, 15, 0.85)', borderColor: colors.border }]}>
-                  <Text style={[styles.gridMediaText, { color: type === 'tv' ? '#EC407A' : '#FFFFFF' }]}>
-                    {type === 'tv' ? 'Series' : 'Movie'}
-                  </Text>
-                </View>
-              );
-            })()}
+
+            <View style={styles.typeBadge}>
+              <Text variant="labelSmall" color={SCRIM_ON} maxFontSizeMultiplier={1.2}>
+                {typeLabel}
+              </Text>
+            </View>
           </View>
-          
-          <Text style={[styles.gridTitle, { color: colors.text }]} numberOfLines={1}>
-            {item.title}
-          </Text>
-          {releaseText ? (
-            <Text style={[styles.gridYear, { color: isFuture ? colors.accent : colors.secondary }]} numberOfLines={1}>
-              {releaseText}
+
+          <View style={styles.gridMeta}>
+            <Text variant="titleSmall" color={colors.onSurface} numberOfLines={2}>
+              {item.title}
             </Text>
-          ) : null}
-        </TouchableOpacity>
+            {releaseText ? (
+              <Text
+                variant="bodySmall"
+                color={isFuture ? colors.primary : colors.onSurfaceVariant}
+                numberOfLines={1}
+              >
+                {releaseText}
+              </Text>
+            ) : null}
+          </View>
+        </Card>
       );
     },
-    [handleItemPress, colors]
+    [handleItemPress, handleLibraryItemLongPress, colors, gridCardWidth, gridPosterHeight]
   );
 
+  /* ---------------------------------------------------------------- *
+   * Settings
+   * ---------------------------------------------------------------- */
+
+  const renderSettings = () => (
+    <ScrollView
+      style={styles.flexOne}
+      contentContainerStyle={{ paddingHorizontal: gutter, paddingBottom: bottomPadding }}
+      showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+    >
+      {/* API keys */}
+      <SettingsGroup title="Connections" icon="key-outline">
+        <TextField
+          label="TMDB API key"
+          value={apiKey}
+          onChangeText={setApiKey}
+          placeholder="API key (v3 auth)"
+          secureTextEntry
+          autoCapitalize="none"
+          supportingText={
+            savedApiKey ? 'A key is saved.' : 'Get a free key at themoviedb.org/settings/api'
+          }
+        />
+        {apiKey !== savedApiKey ? (
+          <Button label="Save key" variant="filled" size="small" onPress={handleSaveApiKey} />
+        ) : null}
+
+        <TextField
+          label="Gemini API key (optional)"
+          value={geminiApiKey}
+          onChangeText={setGeminiApiKey}
+          placeholder="Gemini API key"
+          secureTextEntry
+          autoCapitalize="none"
+          supportingText="Enables AI recommendations. Free key at aistudio.google.com"
+          containerStyle={styles.settingBlock}
+        />
+        {geminiApiKey !== savedGeminiApiKey ? (
+          <Button
+            label="Save Gemini key"
+            variant="filled"
+            size="small"
+            onPress={handleSaveGeminiApiKey}
+          />
+        ) : null}
+
+        <TextField
+          label="Custom TMDB proxy (optional)"
+          value={apiProxy}
+          onChangeText={setApiProxy}
+          placeholder="e.g. https://tmdb.cub.red/3"
+          autoCapitalize="none"
+          autoCorrect={false}
+          containerStyle={styles.settingBlock}
+        />
+        <Button label="Save proxy" variant="outlined" size="small" onPress={handleSaveApiProxy} />
+      </SettingsGroup>
+
+      {/* Appearance */}
+      <SettingsGroup title="Appearance" icon="color-palette-outline">
+        <Text variant="bodyMedium" color={colors.onSurfaceVariant}>
+          Choose light, dark, or follow your device setting.
+        </Text>
+        <ThemeSwitch />
+      </SettingsGroup>
+
+      {/* Content preferences */}
+      <SettingsGroup title="Content" icon="options-outline" flush>
+        <ListItem
+          headline="Include adult content"
+          supportingText="Show R-rated and adult titles"
+          onPress={handleToggleAdult}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: includeAdult }}
+          trailing={
+            <Ionicons
+              name={includeAdult ? 'checkbox' : 'square-outline'}
+              size={24}
+              color={includeAdult ? colors.primary : colors.onSurfaceVariant}
+            />
+          }
+        />
+        <Divider inset={spacing.lg} />
+        <ListItem
+          headline="Filter series by country"
+          supportingText="Only show series available where you are"
+          onPress={handleToggleFilterByCountry}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: filterByCountry }}
+          trailing={
+            <Ionicons
+              name={filterByCountry ? 'checkbox' : 'square-outline'}
+              size={24}
+              color={filterByCountry ? colors.primary : colors.onSurfaceVariant}
+            />
+          }
+        />
+        {filterByCountry ? (
+          <>
+            <Divider inset={spacing.lg} />
+            <ListItem
+              headline="Your country"
+              supportingText={(() => {
+                const c = COUNTRIES.find((x) => x.code === userCountry);
+                return c ? `${c.flag}  ${c.name}` : userCountry;
+              })()}
+              trailingIcon="chevron-down"
+              onPress={() => setCountryDropdownOpen(true)}
+              accessibilityHint="Opens the country picker"
+            />
+          </>
+        ) : null}
+      </SettingsGroup>
+
+      {/* Streaming platforms */}
+      <SettingsGroup title="Streaming platforms" icon="tv-outline">
+        <Text variant="bodyMedium" color={colors.onSurfaceVariant}>
+          Pick your subscriptions to get OTT release alerts.
+        </Text>
+        <View style={styles.chipWrap}>
+          {OTT_PROVIDERS.map((provider) => (
+            <Chip
+              key={provider.id}
+              label={provider.name}
+              variant="filter"
+              selected={selectedOttProviders.includes(provider.id)}
+              onPress={() => handleToggleOttProvider(provider.id)}
+            />
+          ))}
+        </View>
+      </SettingsGroup>
+
+      {/* Languages */}
+      <SettingsGroup title="Preferred languages" icon="language-outline">
+        <Text variant="bodyMedium" color={colors.onSurfaceVariant}>
+          Shapes your feed and the upcoming releases list.
+        </Text>
+        <View style={styles.chipWrap}>
+          {LANGUAGES.map((lang) => (
+            <Chip
+              key={lang.code}
+              label={lang.nativeName}
+              variant="filter"
+              selected={selectedLanguages.includes(lang.code)}
+              onPress={() => handleToggleLanguage(lang.code)}
+            />
+          ))}
+        </View>
+      </SettingsGroup>
+
+      {/* Backup */}
+      <SettingsGroup title="App data" icon="save-outline">
+        <Text variant="bodyMedium" color={colors.onSurfaceVariant}>
+          Save or restore your watchlist, history, ratings, and episode logs.
+        </Text>
+        <View style={styles.buttonRow}>
+          <Button
+            label={backupBusy ? 'Preparing…' : 'Back up'}
+            icon="download-outline"
+            variant="tonal"
+            onPress={handleExportBackup}
+            loading={backupBusy}
+          />
+          <Button
+            label={restoreBusy ? 'Restoring…' : 'Restore'}
+            icon="cloud-upload-outline"
+            variant="tonal"
+            onPress={handleImportBackup}
+            loading={restoreBusy}
+          />
+        </View>
+      </SettingsGroup>
+
+      {/* Cloud sync */}
+      <SettingsGroup title="Cloud sync" icon="cloud-outline">
+        <Text variant="bodyMedium" color={colors.onSurfaceVariant}>
+          {cloudSync.isCloudEnabled()
+            ? `Connected${lastSyncDisplay ? ` · last sync ${lastSyncDisplay}` : ''}`
+            : isFirebaseConfigured()
+              ? 'Set your API key to enable sync.'
+              : 'Firebase is not configured — your data stays on this device.'}
+        </Text>
+        <Button
+          label={syncBusy ? 'Syncing…' : 'Sync now'}
+          icon="sync-outline"
+          variant="tonal"
+          onPress={handleSyncNow}
+          loading={syncBusy}
+          disabled={!cloudSync.isCloudEnabled()}
+        />
+      </SettingsGroup>
+
+      {/* Updates */}
+      <SettingsGroup title="App updates" icon="cloud-download-outline">
+        <Text variant="bodyMedium" color={colors.onSurfaceVariant} accessibilityLiveRegion="polite">
+          {updateStatusText}
+        </Text>
+        <Button
+          label={
+            updateBusy
+              ? 'Checking…'
+              : updateReadyToApply
+                ? 'Restart to apply'
+                : 'Check for updates'
+          }
+          icon={updateReadyToApply ? 'refresh-outline' : 'cloud-download-outline'}
+          variant={updateReadyToApply ? 'filled' : 'tonal'}
+          onPress={updateReadyToApply ? handleApplyUpdate : handleCheckForUpdates}
+          loading={updateBusy}
+        />
+        <Text variant="bodySmall" color={colors.onSurfaceVariant}>
+          v{appVersion} · {buildLabel}
+        </Text>
+      </SettingsGroup>
+
+      {/* Danger zone */}
+      <View
+        style={[
+          styles.dangerZone,
+          { borderColor: colors.error, backgroundColor: colors.errorContainer },
+        ]}
+      >
+        <View style={styles.groupHeader}>
+          <Ionicons name="warning-outline" size={20} color={colors.onErrorContainer} />
+          <Text
+            variant="titleMedium"
+            color={colors.onErrorContainer}
+            accessibilityRole="header"
+          >
+            Danger zone
+          </Text>
+        </View>
+        <Text variant="bodyMedium" color={colors.onErrorContainer}>
+          These actions cannot be undone.
+        </Text>
+        <View style={styles.buttonRow}>
+          <Button
+            label="Clear local data"
+            icon="trash-outline"
+            variant="outlined"
+            onPress={handleClearLocal}
+          />
+          <Button
+            label={resetBusy ? 'Resetting…' : 'Delete all and reset'}
+            icon="nuclear-outline"
+            variant="filled"
+            onPress={handleResetAll}
+            loading={resetBusy}
+          />
+        </View>
+      </View>
+    </ScrollView>
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Render
+   * ---------------------------------------------------------------- */
+
   return (
-    <View style={[styles.container, { backgroundColor: colors.bg }]}>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
       {/* Header */}
-      <View style={[styles.header, { paddingTop: Math.max(16, insets.top) + 12 }]}>
-        <Text style={[styles.headerTitle, { color: colors.text }]}>
+      <View style={[styles.header, { paddingTop: insets.top + spacing.md, paddingHorizontal: gutter }]}>
+        <Text
+          variant="headlineMedium"
+          color={colors.onSurface}
+          accessibilityRole="header"
+          style={styles.flexShrink}
+          numberOfLines={1}
+        >
           {showSettings ? 'Settings' : 'Library'}
         </Text>
-        <TouchableOpacity onPress={() => setShowSettings(!showSettings)}>
-          <Ionicons
-            name={showSettings ? 'close' : 'settings-outline'}
-            size={24}
-            color={colors.secondary}
-          />
-        </TouchableOpacity>
+        <IconButton
+          icon={showSettings ? 'close' : 'settings-outline'}
+          onPress={() => setShowSettings(!showSettings)}
+          accessibilityLabel={showSettings ? 'Close settings' : 'Open settings'}
+        />
       </View>
 
       {showSettings ? (
-        <ScrollView
-          style={{ flex: 1 }}
-          contentContainerStyle={{ paddingBottom: Math.max(100, insets.bottom + 40) }}
-          showsVerticalScrollIndicator={false}
-        >
-          <View style={[styles.settingsPanel, { backgroundColor: colors.card, borderColor: colors.border }]}>
-            <Text style={[styles.settingsTitle, { color: colors.text }]}>Settings</Text>
-
-            <View style={styles.settingRow}>
-              <Text style={[styles.settingLabel, { color: colors.secondary }]}>TMDB API Key</Text>
-              <TextInput
-                style={[styles.settingInput, { backgroundColor: colors.bg, color: colors.text, borderColor: colors.border }]}
-                value={apiKey}
-                onChangeText={setApiKey}
-                placeholder="API Key (v3 auth)"
-                placeholderTextColor={colors.muted}
-                secureTextEntry
-                autoCapitalize="none"
-              />
-              {apiKey !== savedApiKey && (
-                <TouchableOpacity
-                  style={[styles.saveBtn, { backgroundColor: colors.accent, marginTop: 8 }]}
-                  onPress={handleSaveApiKey}
-                >
-                  <Text style={[styles.saveBtnText, { color: colors.bg }]}>Save Key</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-
-            {/* Gemini API Key */}
-            <View style={[styles.settingRow, { marginTop: 16 }]}>
-              <Text style={[styles.settingLabel, { color: colors.secondary }]}>Gemini API Key (Optional)</Text>
-              <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2, marginBottom: 8 }}>
-                Enables AI-powered recommendations based on your detailed ratings (get a free key at aistudio.google.com)
-              </Text>
-              <TextInput
-                style={[styles.settingInput, { backgroundColor: colors.bg, color: colors.text, borderColor: colors.border }]}
-                value={geminiApiKey}
-                onChangeText={setGeminiApiKey}
-                placeholder="Gemini API Key"
-                placeholderTextColor={colors.muted}
-                secureTextEntry
-                autoCapitalize="none"
-              />
-              {geminiApiKey !== savedGeminiApiKey && (
-                <TouchableOpacity
-                  style={[styles.saveBtn, { backgroundColor: colors.accent, marginTop: 8 }]}
-                  onPress={handleSaveGeminiApiKey}
-                >
-                  <Text style={[styles.saveBtnText, { color: colors.bg }]}>Save Gemini Key</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-
-            <View style={[styles.settingRow, { marginTop: 16 }]}>
-              <Text style={[styles.settingLabel, { color: colors.secondary }]}>Custom TMDB Proxy/Mirror (Optional)</Text>
-              <TextInput
-                style={[styles.settingInput, { backgroundColor: colors.bg, color: colors.text, borderColor: colors.border }]}
-                value={apiProxy}
-                onChangeText={setApiProxy}
-                placeholder="e.g. https://tmdb.cub.red/3"
-                placeholderTextColor={colors.muted}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              <TouchableOpacity style={[styles.saveBtn, { backgroundColor: colors.accent }]} onPress={handleSaveApiProxy}>
-                <Text style={[styles.saveBtnText, { color: colors.bg }]}>Save Proxy</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={[styles.settingRowHorizontal, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.settingLabel, { color: colors.secondary }]}>App Theme</Text>
-                <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2 }}>
-                  Toggle dark and light UI modes
-                </Text>
-              </View>
-              <ThemeSwitch />
-            </View>
-
-            {/* Include Adult Content Toggle */}
-            <View style={[styles.settingRowHorizontal, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.settingLabel, { color: colors.secondary }]}>Include Adult Content</Text>
-                <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2 }}>
-                  Show R-rated movies & adult content
-                </Text>
-              </View>
-              <TouchableOpacity onPress={handleToggleAdult} style={styles.toggleBtn}>
-                <Ionicons
-                  name={includeAdult ? 'checkbox' : 'square-outline'}
-                  size={22}
-                  color={includeAdult ? colors.accent : colors.muted}
-                />
-              </TouchableOpacity>
-            </View>
-
-            {/* Filter Series by Country Toggle */}
-            <View style={[styles.settingRowHorizontal, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.settingLabel, { color: colors.secondary }]}>Filter Series by Country</Text>
-                <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2 }}>
-                  Only show series available on streaming/digital in your country
-                </Text>
-              </View>
-              <TouchableOpacity onPress={handleToggleFilterByCountry} style={styles.toggleBtn}>
-                <Ionicons
-                  name={filterByCountry ? 'checkbox' : 'square-outline'}
-                  size={22}
-                  color={filterByCountry ? colors.accent : colors.muted}
-                />
-              </TouchableOpacity>
-            </View>
-
-            {/* User Country Selector — Dropdown */}
-            {filterByCountry && (
-              <View style={[styles.settingRowVertical, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
-                <Text style={[styles.settingLabel, { color: colors.secondary }]}>Your Country</Text>
-                <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2, marginBottom: 8 }}>
-                  Select region for watch provider availability
-                </Text>
-                <TouchableOpacity
-                  style={[
-                    styles.dropdownBtn,
-                    { backgroundColor: colors.bg, borderColor: colors.border },
-                  ]}
-                  onPress={() => setCountryDropdownOpen(true)}
-                >
-                  <Text style={[styles.dropdownBtnText, { color: colors.text }]}>
-                    {(() => { const c = COUNTRIES.find(c => c.code === userCountry); return c ? `${c.flag}  ${c.name}` : userCountry; })()}
-                  </Text>
-                  <Ionicons name="chevron-down" size={18} color={colors.muted} />
-                </TouchableOpacity>
-
-                {/* Country Dropdown Modal */}
-                <Modal visible={countryDropdownOpen} transparent animationType="fade" onRequestClose={() => setCountryDropdownOpen(false)}>
-                  <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }} onPress={() => setCountryDropdownOpen(false)}>
-                    <View style={[styles.dropdownModal, { backgroundColor: colors.card }]}>
-                      <Text style={[styles.dropdownTitle, { color: colors.text }]}>Select Country</Text>
-                      <ScrollView style={{ maxHeight: 360 }} showsVerticalScrollIndicator={false}>
-                        {COUNTRIES.map((country) => {
-                          const isSelected = userCountry === country.code;
-                          return (
-                            <TouchableOpacity
-                              key={country.code}
-                              style={[
-                                styles.dropdownItem,
-                                { borderBottomColor: colors.border },
-                                isSelected && { backgroundColor: colors.accentMuted },
-                              ]}
-                              onPress={() => {
-                                handleSelectCountry(country.code);
-                                setCountryDropdownOpen(false);
-                              }}
-                            >
-                              <Text style={{ fontSize: 18, marginRight: 10 }}>{country.flag}</Text>
-                              <Text style={[styles.dropdownItemText, { color: colors.text }, isSelected && { color: colors.accent, fontWeight: '700' }]}>
-                                {country.name}
-                              </Text>
-                              {isSelected && <Ionicons name="checkmark" size={18} color={colors.accent} style={{ marginLeft: 'auto' }} />}
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </ScrollView>
-                    </View>
-                  </Pressable>
-                </Modal>
-              </View>
-            )}
-
-            {/* Streaming Platforms Selector */}
-            <View style={[styles.settingRowVertical, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
-              <Text style={[styles.settingLabel, { color: colors.secondary }]}>Streaming Platforms</Text>
-              <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2, marginBottom: 8 }}>
-                Select your subscribed platforms to get OTT release alerts
-              </Text>
-              <View style={styles.langChipsContainer}>
-                {OTT_PROVIDERS.map((provider) => {
-                  const isSelected = selectedOttProviders.includes(provider.id);
-                  return (
-                    <TouchableOpacity
-                      key={provider.id}
-                      onPress={() => handleToggleOttProvider(provider.id)}
-                      style={[
-                        styles.langChip,
-                        {
-                          backgroundColor: isSelected ? colors.accentMuted : colors.bg,
-                          borderColor: isSelected ? colors.accent : colors.border,
-                        },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.langChipText,
-                          { color: isSelected ? colors.accent : colors.secondary },
-                        ]}
-                      >
-                        {provider.name}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </View>
-
-            {/* Preferred Languages Selector */}
-            <View style={[styles.settingRowVertical, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
-              <Text style={[styles.settingLabel, { color: colors.secondary }]}>Preferred Languages</Text>
-              <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2, marginBottom: 8 }}>
-                Filter upcoming movies by language
-              </Text>
-              <View style={styles.langChipsContainer}>
-                {LANGUAGES.map((lang) => {
-                  const isSelected = selectedLanguages.includes(lang.code);
-                  return (
-                    <TouchableOpacity
-                      key={lang.code}
-                      onPress={() => handleToggleLanguage(lang.code)}
-                      style={[
-                        styles.langChip,
-                        {
-                          backgroundColor: isSelected ? colors.accentMuted : colors.bg,
-                          borderColor: isSelected ? colors.accent : colors.border,
-                        },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.langChipText,
-                          { color: isSelected ? colors.accent : colors.secondary },
-                        ]}
-                      >
-                        {lang.nativeName}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </View>
-
-            <View style={[styles.settingRowVertical, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
-              <Text style={[styles.settingLabel, { color: colors.secondary }]}>App Data</Text>
-              <Text style={{ fontSize: 11, color: colors.muted, marginTop: 2, marginBottom: 8 }}>
-                Save or restore your watchlist, watched history, ratings, and episode logs
-              </Text>
-              <View style={styles.backupActions}>
-                <TouchableOpacity
-                  style={[styles.backupBtn, { borderColor: colors.border, backgroundColor: colors.bg }]}
-                  onPress={handleExportBackup}
-                  disabled={backupBusy}
-                >
-                  <Ionicons name="download-outline" size={16} color={colors.accent} />
-                  <Text style={[styles.backupBtnText, { color: colors.text }]}>
-                    {backupBusy ? 'Preparing...' : 'Backup'}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.backupBtn, { borderColor: colors.border, backgroundColor: colors.bg }]}
-                  onPress={handleImportBackup}
-                  disabled={restoreBusy}
-                >
-                  <Ionicons name="cloud-upload-outline" size={16} color={colors.accent} />
-                  <Text style={[styles.backupBtnText, { color: colors.text }]}>
-                    {restoreBusy ? 'Restoring...' : 'Restore'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {!savedApiKey && (
-              <Text style={[styles.apiHint, { color: colors.muted, marginTop: 16 }]}>
-                Get a free API key at themoviedb.org/settings/api
-              </Text>
-            )}
-            {Boolean(savedApiKey) && (
-              <Text style={[styles.apiSaved, { marginTop: 16 }]}>✓ API key is set</Text>
-            )}
-
-            {/* ── Cloud Sync Section ── */}
-            <View style={[styles.settingRowVertical, { borderTopWidth: 0.5, borderTopColor: colors.border, paddingTop: 16, marginTop: 16 }]}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                <Ionicons name="cloud-outline" size={18} color={colors.accent} />
-                <Text style={[styles.settingLabel, { color: colors.secondary }]}>Cloud Sync</Text>
-              </View>
-              <Text style={{ fontSize: 11, color: colors.muted, marginBottom: 8 }}>
-                {cloudSync.isCloudEnabled()
-                  ? `Connected${lastSyncDisplay ? ` · Last sync: ${lastSyncDisplay}` : ''}`
-                  : isFirebaseConfigured()
-                  ? 'Set your API key to enable sync'
-                  : 'Firebase not configured — data is local only'}
-              </Text>
-              <TouchableOpacity
-                style={[
-                  styles.backupBtn,
-                  {
-                    borderColor: cloudSync.isCloudEnabled() ? colors.accent : colors.border,
-                    backgroundColor: colors.bg,
-                    opacity: syncBusy ? 0.6 : 1,
-                  },
-                ]}
-                onPress={handleSyncNow}
-                disabled={syncBusy}
-              >
-                {syncBusy ? (
-                  <ActivityIndicator size={14} color={colors.accent} />
-                ) : (
-                  <Ionicons name="sync-outline" size={16} color={colors.accent} />
-                )}
-                <Text style={[styles.backupBtnText, { color: colors.text }]}>
-                  {syncBusy ? 'Syncing...' : 'Sync Now'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* ── Danger Zone ── */}
-            <View style={[styles.settingRowVertical, { borderTopWidth: 0.5, borderTopColor: '#3A1A1A', paddingTop: 16, marginTop: 16 }]}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                <Ionicons name="warning-outline" size={18} color="#EF4444" />
-                <Text style={[styles.settingLabel, { color: '#EF4444' }]}>Danger Zone</Text>
-              </View>
-              <Text style={{ fontSize: 11, color: colors.muted, marginBottom: 10 }}>
-                These actions cannot be undone. Proceed with caution.
-              </Text>
-              <View style={styles.backupActions}>
-                <TouchableOpacity
-                  style={[styles.backupBtn, { borderColor: '#EF4444', backgroundColor: colors.bg }]}
-                  onPress={handleClearLocal}
-                >
-                  <Ionicons name="trash-outline" size={16} color="#EF4444" />
-                  <Text style={[styles.backupBtnText, { color: '#EF4444' }]}>Clear Local Data</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.backupBtn,
-                    {
-                      borderColor: '#EF4444',
-                      backgroundColor: resetBusy ? '#3A1A1A' : '#EF4444',
-                      opacity: resetBusy ? 0.6 : 1,
-                    },
-                  ]}
-                  onPress={handleResetAll}
-                  disabled={resetBusy}
-                >
-                  {resetBusy ? (
-                    <ActivityIndicator size={14} color="#fff" />
-                  ) : (
-                    <Ionicons name="nuclear-outline" size={16} color="#fff" />
-                  )}
-                  <Text style={[styles.backupBtnText, { color: '#fff', fontWeight: '700' }]}>
-                    {resetBusy ? 'Resetting...' : 'Delete All & Reset'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </ScrollView>
+        renderSettings()
       ) : (
         <>
-          {/* Tab Switcher */}
-          <View style={styles.tabRow}>
-            {[
-              { key: 'watchlist' as LibraryTab, label: 'Watchlist', icon: 'bookmark-outline' as const },
-              { key: 'watched' as LibraryTab, label: 'Watched', icon: 'checkmark-circle-outline' as const },
-            ].map(({ key, label, icon }) => (
-              <TouchableOpacity
-                key={key}
-                style={[
-                  styles.tabItem,
-                  { backgroundColor: colors.card, borderColor: colors.border },
-                  activeTab === key && { backgroundColor: colors.accentMuted, borderColor: colors.accent },
-                ]}
-                onPress={() => setActiveTab(key)}
-              >
-                <Ionicons
-                  name={icon}
-                  size={16}
-                  color={activeTab === key ? colors.accent : colors.muted}
-                />
-                <Text
-                  style={[
-                    styles.tabLabel,
-                    { color: colors.muted },
-                    activeTab === key && { color: colors.accent },
-                  ]}
-                >
-                  {label}
-                </Text>
-                 <View
-                  style={[
-                    styles.countBadge,
-                    { backgroundColor: activeTab === key ? colors.accentMuted : colors.border },
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.countText,
-                      { color: activeTab === key ? colors.accent : colors.secondary },
-                    ]}
-                  >
-                    {counts[key]}
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            ))}
+          {/* Watchlist / Watched */}
+          <View style={{ paddingHorizontal: gutter, paddingBottom: spacing.md }}>
+            <SegmentedButtons
+              options={[
+                { value: 'watchlist' as LibraryTab, label: `Watchlist (${counts.watchlist})` },
+                { value: 'watched' as LibraryTab, label: `Watched (${counts.watched})` },
+              ]}
+              value={activeTab}
+              onChange={setActiveTab}
+              accessibilityLabel="Library section"
+              style={styles.fullWidthSegments}
+            />
           </View>
 
-          {/* Media Type Filter Chips */}
-          <View style={styles.filterChipRow}>
+          {/* Media type filter */}
+          <View style={[styles.chipRow, { paddingHorizontal: gutter }]}>
             {[
               { key: null, label: 'All' },
               { key: 'movie' as MediaType, label: 'Movies' },
               { key: 'tv' as MediaType, label: 'Series' },
             ].map(({ key, label }) => (
-              <TouchableOpacity
+              <Chip
                 key={String(key)}
-                style={[
-                  styles.filterChip,
-                  { backgroundColor: colors.card, borderColor: colors.border },
-                  filterMediaType === key && { backgroundColor: colors.accent, borderColor: colors.accent },
-                ]}
+                label={label}
+                variant="filter"
+                selected={filterMediaType === key}
                 onPress={() => setFilterMediaType(key)}
-              >
-                <Text
-                  style={[
-                    styles.filterChipText,
-                    { color: colors.secondary },
-                    filterMediaType === key && { color: colors.bg, fontWeight: '700' },
-                  ]}
-                >
-                  {label}
-                </Text>
-              </TouchableOpacity>
+              />
             ))}
           </View>
 
-          {/* Items List */}
+          {/* Grid */}
           <FlatList
-            style={{ flex: 1 }}
-            key={`${filterMediaType}-${activeTab}`}
+            style={styles.flexOne}
+            key={`${filterMediaType}-${activeTab}-${posterColumns}`}
             data={items}
             renderItem={renderLibraryItem}
             keyExtractor={(item) => `lib-${item.id}`}
-            numColumns={3}
-            columnWrapperStyle={styles.gridRow}
+            numColumns={posterColumns}
+            columnWrapperStyle={
+              posterColumns > 1 ? { paddingHorizontal: gutter, gap: GRID_GAP } : undefined
+            }
             showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 100 }}
+            contentContainerStyle={{ paddingBottom: bottomPadding, gap: spacing.lg }}
             refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} />
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor={colors.primary}
+                colors={[colors.primary]}
+                progressBackgroundColor={colors.surfaceContainerHigh}
+              />
             }
             ListEmptyComponent={
-              <View style={styles.emptyState}>
-                <Ionicons
-                  name={
-                    activeTab === 'watchlist'
-                      ? 'bookmark-outline'
-                      : 'checkmark-circle-outline'
-                  }
-                  size={48}
-                  color={colors.muted}
-                />
-                <Text style={[styles.emptyTitle, { color: colors.text }]}>
-                  {activeTab === 'watchlist'
-                    ? 'Your watchlist is empty'
-                    : 'No movies logged yet'}
-                </Text>
-                <Text style={[styles.emptySubtitle, { color: colors.secondary }]}>
-                  {activeTab === 'watchlist'
-                    ? 'Browse movies and add them to your watchlist'
-                    : 'Start logging movies you watch'}
-                </Text>
-              </View>
+              <EmptyState
+                icon={activeTab === 'watchlist' ? 'bookmark-outline' : 'checkmark-circle-outline'}
+                title={
+                  activeTab === 'watchlist' ? 'Your watchlist is empty' : 'Nothing logged yet'
+                }
+                subtitle={
+                  activeTab === 'watchlist'
+                    ? 'Browse Discover and save titles you want to watch.'
+                    : 'Rate something you have seen and it will appear here.'
+                }
+                compact
+              />
             }
           />
         </>
       )}
-      {/* Custom Confirmation Modal */}
-      {confirmModal && (
-        <Modal
-          visible={confirmModal.visible}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setConfirmModal(null)}
-        >
-          <Pressable style={styles.modalOverlay} onPress={() => setConfirmModal(null)}>
-            <Pressable
-              style={[
-                styles.modalContent,
-                { backgroundColor: colors.elevated, borderColor: colors.border },
-              ]}
-              onPress={(e) => e.stopPropagation()}
-            >
-              <Text style={[styles.modalTitle, { color: colors.text }]}>{confirmModal.title}</Text>
-              <Text style={[styles.modalMessage, { color: colors.secondary }]}>{confirmModal.message}</Text>
-              
-              <View style={styles.modalButtonsRow}>
-                {confirmModal.showCancel !== false && (
-                  <TouchableOpacity
-                    style={[styles.modalBtn, styles.modalCancelBtn, { borderColor: colors.border }]}
-                    onPress={() => setConfirmModal(null)}
-                  >
-                    <Text style={[styles.modalBtnText, { color: colors.text }]}>Cancel</Text>
-                  </TouchableOpacity>
-                )}
-                <TouchableOpacity
-                  style={[
-                    styles.modalBtn,
-                    confirmModal.isDestructive 
-                      ? { backgroundColor: '#EF4444' } 
-                      : { backgroundColor: colors.accent }
-                  ]}
-                  onPress={() => {
-                    const action = confirmModal.onConfirm;
-                    setConfirmModal(null);
-                    action();
-                  }}
-                >
-                  <Text style={[styles.modalBtnText, { color: colors.bg, fontWeight: '700' }]}>
-                    {confirmModal.confirmText}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </Pressable>
-          </Pressable>
-        </Modal>
-      )}
 
-      {/* Long Press Quick Actions Bottom Sheet */}
-      {longPressItem && (
-        <Modal
-          visible={!!longPressItem}
-          transparent
-          animationType="slide"
-          onRequestClose={() => setLongPressItem(null)}
-        >
-          <Pressable style={styles.bottomSheetOverlay} onPress={() => setLongPressItem(null)}>
-            <Pressable
-              style={[
-                styles.bottomSheetContent,
-                { backgroundColor: colors.elevated },
-              ]}
-              onPress={(e) => e.stopPropagation()}
-            >
-              {/* Header */}
-              <View style={styles.bottomSheetHeader}>
-                <View style={[styles.bottomSheetHandle, { backgroundColor: colors.border }]} />
-                <Text style={[styles.bottomSheetTitle, { color: colors.text }]} numberOfLines={1}>
-                  {longPressItem.title}
-                </Text>
-                {longPressItem.releaseDate && (
-                  <Text style={[styles.bottomSheetSubtitle, { color: colors.secondary }]}>
-                    {new Date(longPressItem.releaseDate) > new Date() ? 'Unreleased' : 'Released in ' + longPressItem.releaseDate.substring(0, 4)}
-                  </Text>
-                )}
-              </View>
+      {/* Country picker */}
+      <BottomSheet
+        visible={countryDropdownOpen}
+        onDismiss={() => setCountryDropdownOpen(false)}
+        title="Select country"
+      >
+        <View style={styles.sheetList}>
+          {COUNTRIES.map((country) => (
+            <ListItem
+              key={country.code}
+              headline={`${country.flag}  ${country.name}`}
+              selected={userCountry === country.code}
+              trailingIcon={userCountry === country.code ? 'checkmark' : undefined}
+              accessibilityRole="menuitem"
+              accessibilityState={{ selected: userCountry === country.code }}
+              onPress={() => {
+                handleSelectCountry(country.code);
+                setCountryDropdownOpen(false);
+              }}
+            />
+          ))}
+        </View>
+      </BottomSheet>
 
-              {/* Options */}
-              <View style={styles.bottomSheetOptions}>
-                {/* Option 1: Rate & Log (only if released) */}
-                {!(longPressItem.releaseDate && new Date(longPressItem.releaseDate) > new Date()) && (
-                  <TouchableOpacity
-                    style={[styles.bottomSheetOptionBtn, { borderBottomWidth: 0.5, borderBottomColor: colors.border }]}
-                    onPress={() => handleLongPressAction('rate')}
-                  >
-                    <Ionicons name="star" size={20} color={colors.accent} style={{ marginRight: 12 }} />
-                    <Text style={[styles.bottomSheetOptionText, { color: colors.text }]}>Rate & Log</Text>
-                  </TouchableOpacity>
-                )}
+      {/* Confirmation dialog */}
+      <Dialog
+        visible={!!confirmModal?.visible}
+        onDismiss={() => setConfirmModal(null)}
+        title={confirmModal?.title ?? ''}
+        message={confirmModal?.message}
+        dismissable={confirmModal?.showCancel !== false}
+        actions={
+          <>
+            {confirmModal?.showCancel !== false ? (
+              <Button label="Cancel" variant="text" onPress={() => setConfirmModal(null)} />
+            ) : null}
+            <Button
+              label={confirmModal?.confirmText ?? 'OK'}
+              variant={confirmModal?.isDestructive ? 'filled' : 'text'}
+              onPress={() => {
+                const action = confirmModal?.onConfirm;
+                setConfirmModal(null);
+                action?.();
+              }}
+            />
+          </>
+        }
+      />
 
-                {/* Option 2: Remove from Library */}
-                <TouchableOpacity
-                  style={[styles.bottomSheetOptionBtn, { borderBottomWidth: 0.5, borderBottomColor: colors.border }]}
-                  onPress={() => handleLongPressAction('remove')}
-                >
-                  <Ionicons name="trash-outline" size={20} color="#EF4444" style={{ marginRight: 12 }} />
-                  <Text style={[styles.bottomSheetOptionText, { color: '#EF4444' }]}>Remove from Library</Text>
-                </TouchableOpacity>
+      {/* Quick actions */}
+      <BottomSheet
+        visible={!!longPressItem}
+        onDismiss={() => setLongPressItem(null)}
+        title={longPressItem?.title ?? ''}
+        subtitle={
+          longPressItem?.releaseDate
+            ? new Date(longPressItem.releaseDate) > new Date()
+              ? 'Not yet released'
+              : `Released in ${longPressItem.releaseDate.substring(0, 4)}`
+            : undefined
+        }
+      >
+        <View style={styles.sheetList}>
+          {longPressItem &&
+          !(longPressItem.releaseDate && new Date(longPressItem.releaseDate) > new Date()) ? (
+            <ListItem
+              headline="Rate and log"
+              leadingIcon="star-outline"
+              leadingIconColor={colors.primary}
+              onPress={() => handleLongPressAction('rate')}
+            />
+          ) : null}
 
-                {/* Option 3: Not Interested */}
-                <TouchableOpacity
-                  style={styles.bottomSheetOptionBtn}
-                  onPress={() => handleLongPressAction('not_interested')}
-                >
-                  <Ionicons name="eye-off-outline" size={20} color={colors.accent} style={{ marginRight: 12 }} />
-                  <Text style={[styles.bottomSheetOptionText, { color: colors.text }]}>Not Interested</Text>
-                </TouchableOpacity>
-              </View>
+          <ListItem
+            headline="Remove from library"
+            leadingIcon="trash-outline"
+            destructive
+            onPress={() => handleLongPressAction('remove')}
+          />
 
-              {/* Cancel button */}
-              <TouchableOpacity
-                style={[styles.bottomSheetCancelBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-                onPress={() => setLongPressItem(null)}
-              >
-                <Text style={[styles.bottomSheetCancelText, { color: colors.text }]}>Cancel</Text>
-              </TouchableOpacity>
-            </Pressable>
-          </Pressable>
-        </Modal>
-      )}
+          <ListItem
+            headline="Not interested"
+            leadingIcon="eye-off-outline"
+            leadingIconColor={colors.primary}
+            onPress={() => handleLongPressAction('not_interested')}
+            accessibilityHint="Hides this title from recommendations"
+          />
+        </View>
+      </BottomSheet>
     </View>
+  );
+}
+
+/** Foreground for badges drawn on the poster scrim. */
+const SCRIM_ON = '#FFFFFF';
+
+/**
+ * Titled card grouping related settings.
+ *
+ * `flush` drops the inner padding for groups made of full-bleed list rows,
+ * whose own padding would otherwise be doubled.
+ */
+function SettingsGroup({
+  title,
+  icon,
+  children,
+  flush = false,
+}: {
+  title: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  children: React.ReactNode;
+  flush?: boolean;
+}) {
+  const { colors } = useTheme();
+  return (
+    <Card variant="filled" radius={shape.large} style={styles.settingsGroup}>
+      <View style={[styles.groupHeader, styles.groupHeaderPadded]}>
+        <Ionicons name={icon} size={20} color={colors.primary} />
+        <Text variant="titleMedium" color={colors.onSurface} accessibilityRole="header">
+          {title}
+        </Text>
+      </View>
+      <View style={flush ? styles.groupBodyFlush : styles.groupBody}>{children}</View>
+    </Card>
   );
 }
 
@@ -1370,408 +1365,125 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-  },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: '800',
-    letterSpacing: -0.5,
-  },
-  settingsPanel: {
-    marginHorizontal: 16,
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 16,
-    borderWidth: 0.5,
-  },
-  settingsTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 12,
-  },
-  settingRow: {
-    gap: 8,
-  },
-  settingRowHorizontal: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  settingLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  settingInput: {
-    borderRadius: 10,
-    padding: 12,
-    fontSize: 14,
-    borderWidth: 1,
-  },
-  saveBtn: {
-    alignSelf: 'flex-end',
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  saveBtnText: {
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  apiHint: {
-    fontSize: 12,
-    marginTop: 8,
-  },
-  apiSaved: {
-    fontSize: 12,
-    color: '#00C853',
-    marginTop: 8,
-    fontWeight: '500',
-  },
-  tabRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    gap: 6,
-    marginBottom: 16,
-  },
-  tabItem: {
+  flexOne: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: 0.5,
-    gap: 3,
   },
-  tabItemActive: {},
-  tabLabel: {
-    fontSize: 11,
-    fontWeight: '600',
+  flexShrink: {
+    flexShrink: 1,
   },
-  tabLabelActive: {},
-  countBadge: {
-    minWidth: 16,
-    height: 16,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  countBadgeActive: {},
-  countText: {
-    fontSize: 9,
-    fontWeight: '700',
-  },
-  countTextActive: {},
-  itemCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 12,
-    padding: 10,
-    marginBottom: 8,
-    gap: 12,
-    borderWidth: 0.5,
-  },
-  itemPoster: {
-    width: 48,
-    height: 72,
-    borderRadius: 8,
-  },
-  posterPlaceholder: {
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  itemInfo: {
-    flex: 1,
-    gap: 2,
-  },
-  itemTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  itemMeta: {
-    fontSize: 12,
-  },
-  itemDate: {
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  emptyState: {
-    alignItems: 'center',
-    paddingTop: 60,
-    gap: 10,
-  },
-  emptyTitle: {
-    fontSize: 17,
-    fontWeight: '600',
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    textAlign: 'center',
-    paddingHorizontal: 40,
-  },
-  toggleBtn: {
-    padding: 4,
-  },
-  settingRowVertical: {
-    gap: 4,
-  },
-  langChipsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  langChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-    borderWidth: 1,
-  },
-  langChipText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  backupActions: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  backupBtn: {
-    flex: 1,
-    minHeight: 40,
-    borderRadius: 8,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    gap: 6,
-  },
-  backupBtnText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  filterChipRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    gap: 8,
-    marginBottom: 16,
-  },
-  filterChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 0.5,
-  },
-  filterChipText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  gridCard: {
-    width: CARD_WIDTH,
-    marginBottom: 16,
-  },
-  gridPosterContainer: {
-    width: '100%',
-    height: CARD_WIDTH * 1.5,
-    borderRadius: 10,
-    overflow: 'hidden',
-  },
-  gridPoster: {
+  fill: {
     width: '100%',
     height: '100%',
   },
-  gridRating: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    backgroundColor: 'rgba(0,0,0,0.75)',
-    borderRadius: 6,
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  gridRatingText: {
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  gridMediaBadge: {
-    position: 'absolute',
-    bottom: 6,
-    right: 6,
-    borderRadius: 4,
-    borderWidth: 0.5,
-    paddingHorizontal: 4,
-    paddingVertical: 1,
+  center: {
     alignItems: 'center',
     justifyContent: 'center',
   },
-  gridMediaText: {
-    fontSize: 8,
-    fontWeight: '800',
-  },
-  gridTitle: {
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 6,
-  },
-  gridYear: {
-    fontSize: 11,
-    marginTop: 2,
-  },
-  gridRow: {
-    justifyContent: 'flex-start',
-    gap: 6,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.65)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  modalContent: {
-    width: '100%',
-    maxWidth: 320,
-    borderRadius: 16,
-    borderWidth: 0.5,
-    padding: 20,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 8,
-    elevation: 8,
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  modalMessage: {
-    fontSize: 13,
-    lineHeight: 18,
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  bottomSheetOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'flex-end',
-  },
-  bottomSheetContent: {
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    paddingHorizontal: 24,
-    paddingTop: 12,
-    paddingBottom: 34,
-  },
-  bottomSheetHeader: {
-    alignItems: 'center',
-    paddingVertical: 12,
-  },
-  bottomSheetHandle: {
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    marginBottom: 16,
-  },
-  bottomSheetTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    textAlign: 'center',
-  },
-  bottomSheetSubtitle: {
-    fontSize: 12,
-    fontWeight: '500',
-    marginTop: 4,
-  },
-  bottomSheetOptions: {
-    borderRadius: 14,
-    overflow: 'hidden',
-    marginTop: 16,
-    marginBottom: 16,
-  },
-  bottomSheetOptionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
-  },
-  bottomSheetOptionText: {
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  bottomSheetCancelBtn: {
-    borderRadius: 14,
-    paddingVertical: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-  },
-  bottomSheetCancelText: {
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  modalButtonsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    width: '100%',
-  },
-  modalBtn: {
-    flex: 1,
-    height: 40,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modalCancelBtn: {
-    borderWidth: 1,
-  },
-  modalBtnText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  dropdownBtn: {
+
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 10,
-    borderWidth: 1,
+    gap: spacing.sm,
+    paddingBottom: spacing.md,
+    minHeight: 64,
   },
-  dropdownBtnText: {
-    fontSize: 14,
-    fontWeight: '600',
+
+  fullWidthSegments: {
+    alignSelf: 'stretch',
   },
-  dropdownModal: {
-    width: '80%',
-    maxWidth: 340,
-    borderRadius: 16,
-    padding: 16,
-    maxHeight: 440,
+  chipRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingBottom: spacing.md,
   },
-  dropdownTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    marginBottom: 12,
+  chipWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
   },
-  dropdownItem: {
+
+  /* Library grid */
+  gridPosterWrap: {
+    width: '100%',
+    borderRadius: shape.medium,
+    overflow: 'hidden',
+  },
+  gridMeta: {
+    marginTop: spacing.sm,
+    gap: 2,
+  },
+  ratingBadge: {
+    position: 'absolute',
+    top: spacing.sm,
+    right: spacing.sm,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderBottomWidth: 0.5,
-    borderRadius: 8,
+    gap: 3,
+    borderRadius: shape.extraSmall,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
   },
-  dropdownItemText: {
-    fontSize: 15,
-    fontWeight: '500',
+  ratingBadgeScrim: {
+    position: 'absolute',
+    top: spacing.sm,
+    right: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: withAlpha('#000000', 0.62),
+    borderRadius: shape.extraSmall,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  typeBadge: {
+    position: 'absolute',
+    bottom: spacing.sm,
+    right: spacing.sm,
+    backgroundColor: withAlpha('#000000', 0.62),
+    borderRadius: shape.extraSmall,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+
+  /* Settings */
+  settingsGroup: {
+    marginBottom: spacing.lg,
+    paddingVertical: spacing.lg,
+  },
+  groupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  groupHeaderPadded: {
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.md,
+  },
+  groupBody: {
+    paddingHorizontal: spacing.lg,
+    gap: spacing.md,
+  },
+  groupBodyFlush: {
+    gap: 0,
+  },
+  settingBlock: {
+    marginTop: spacing.sm,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  dangerZone: {
+    borderRadius: shape.large,
+    borderWidth: 1,
+    padding: spacing.lg,
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+  },
+
+  sheetList: {
+    marginHorizontal: -spacing.xl,
   },
 });

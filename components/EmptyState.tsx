@@ -1,7 +1,9 @@
 import React from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { shape, spacing } from '../constants/m3';
 import { useTheme } from '../context/ThemeContext';
+import { Button, Text } from './m3';
 
 interface EmptyStateProps {
   icon: string;
@@ -9,33 +11,52 @@ interface EmptyStateProps {
   subtitle: string;
   actionLabel?: string;
   onAction?: () => void;
+  /** Renders inline (no flex-fill) for use inside a scrolling list. */
+  compact?: boolean;
 }
 
+/**
+ * Material 3 empty state.
+ *
+ * The icon sits in a tonal circle rather than floating on the background, which
+ * gives the block a visual anchor, and the whole thing is one accessibility
+ * node so it is announced as a single message.
+ */
 export default function EmptyState({
   icon,
   title,
   subtitle,
   actionLabel,
   onAction,
+  compact = false,
 }: EmptyStateProps) {
   const { colors } = useTheme();
 
   return (
-    <View style={styles.container}>
-      <Ionicons
-        name={icon as any}
-        size={64}
-        color={colors.muted}
-        style={styles.icon}
-      />
-      <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
-      <Text style={[styles.subtitle, { color: colors.secondary }]}>{subtitle}</Text>
+    <View
+      style={[styles.container, compact && styles.compact]}
+      accessible
+      accessibilityLabel={`${title}. ${subtitle}`}
+    >
+      <View style={[styles.iconCircle, { backgroundColor: colors.surfaceContainerHighest }]}>
+        <Ionicons name={icon as any} size={32} color={colors.onSurfaceVariant} />
+      </View>
 
-      {actionLabel && onAction && (
-        <Pressable onPress={onAction} style={[styles.actionButton, { backgroundColor: colors.accent }]}>
-          <Text style={[styles.actionText, { color: colors.bg }]}>{actionLabel}</Text>
-        </Pressable>
-      )}
+      <Text variant="titleMedium" color={colors.onSurface} style={styles.center}>
+        {title}
+      </Text>
+      <Text variant="bodyMedium" color={colors.onSurfaceVariant} style={styles.center}>
+        {subtitle}
+      </Text>
+
+      {actionLabel && onAction ? (
+        <Button
+          label={actionLabel}
+          variant="tonal"
+          onPress={onAction}
+          style={styles.action}
+        />
+      ) : null}
     </View>
   );
 }
@@ -45,30 +66,30 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 40,
+    paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.xxl,
+    gap: spacing.sm,
   },
-  icon: {
-    marginBottom: 16,
+  compact: {
+    // Not `flex: 0`: on React Native Web that resolves to `flex-basis: 0%`
+    // with no grow, collapsing the block to zero height so its content spills
+    // over whatever follows it.
+    flexGrow: 0,
+    flexShrink: 0,
+    flexBasis: 'auto',
   },
-  title: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 8,
+  iconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: shape.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.sm,
+  },
+  center: {
     textAlign: 'center',
   },
-  subtitle: {
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 24,
-  },
-  actionButton: {
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 999,
-  },
-  actionText: {
-    fontSize: 15,
-    fontWeight: '600',
+  action: {
+    marginTop: spacing.md,
   },
 });
