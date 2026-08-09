@@ -1141,7 +1141,7 @@ export default function ProfileScreen() {
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + spacing.md, paddingHorizontal: gutter }]}>
         <Text
-          variant="headlineMedium"
+          variant="headlineSmall"
           color={colors.onSurface}
           accessibilityRole="header"
           style={styles.flexShrink}
@@ -1383,8 +1383,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: spacing.sm,
-    paddingBottom: spacing.md,
-    minHeight: 64,
+    paddingBottom: spacing.sm,
+    minHeight: 52,
   },
 
   fullWidthSegments: {
@@ -1446,8 +1446,8 @@ const styles = StyleSheet.create({
 
   /* Settings */
   settingsGroup: {
-    marginBottom: spacing.lg,
-    paddingVertical: spacing.lg,
+    marginBottom: spacing.md,
+    paddingVertical: spacing.md,
   },
   groupHeader: {
     flexDirection: 'row',
@@ -1460,7 +1460,7 @@ const styles = StyleSheet.create({
   },
   groupBody: {
     paddingHorizontal: spacing.lg,
-    gap: spacing.md,
+    gap: spacing.sm,
   },
   groupBodyFlush: {
     gap: 0,
@@ -1476,9 +1476,9 @@ const styles = StyleSheet.create({
   dangerZone: {
     borderRadius: shape.large,
     borderWidth: 1,
-    padding: spacing.lg,
-    gap: spacing.md,
-    marginBottom: spacing.lg,
+    padding: spacing.md,
+    gap: spacing.sm,
+    marginBottom: spacing.md,
   },
 
   sheetList: {

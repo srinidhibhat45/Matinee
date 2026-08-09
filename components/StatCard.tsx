@@ -44,7 +44,7 @@ export default function StatCard({
     >
       <View style={styles.body}>
         <View style={[styles.iconCircle, { backgroundColor: colors.surfaceContainerLow }]}>
-          <Ionicons name={icon as any} size={20} color={iconColor} />
+          <Ionicons name={icon as any} size={18} color={iconColor} />
         </View>
         <Text variant="headlineSmall" color={colors.onSurface} numberOfLines={1}>
           {value}
@@ -59,21 +59,21 @@ export default function StatCard({
 
 const styles = StyleSheet.create({
   card: {
-    minHeight: 132,
+    minHeight: 104,
   },
   flexible: {
     flex: 1,
   },
   body: {
-    padding: spacing.lg,
-    gap: spacing.xs,
+    padding: spacing.md,
+    gap: 1,
   },
   iconCircle: {
-    width: 40,
-    height: 40,
+    width: 32,
+    height: 32,
     borderRadius: shape.full,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: spacing.sm,
+    marginBottom: spacing.xs,
   },
 });

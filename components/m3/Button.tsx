@@ -34,6 +34,11 @@ export interface ButtonProps {
   loading?: boolean;
   /** Stretches to fill the parent's cross axis. */
   fullWidth?: boolean;
+  /**
+   * Trims the horizontal gutter for dense layouts such as a narrow action
+   * column. The height — and therefore the touch target — is unchanged.
+   */
+  compact?: boolean;
   style?: StyleProp<ViewStyle>;
   accessibilityLabel?: string;
   accessibilityHint?: string;
@@ -64,6 +69,7 @@ export default function Button({
   disabled = false,
   loading = false,
   fullWidth = false,
+  compact = false,
   style,
   accessibilityLabel,
   accessibilityHint,
@@ -178,14 +184,18 @@ export default function Button({
           height: dims.height,
           // `text` buttons sit flush with surrounding content, so they use a
           // tighter gutter — M3 gives them 12dp instead of the full 24dp.
-          paddingHorizontal: variant === 'text' ? spacing.md : dims.paddingH,
-          minWidth: MIN_TOUCH_TARGET,
+          paddingHorizontal: compact
+            ? spacing.sm
+            : variant === 'text'
+              ? spacing.md
+              : dims.paddingH,
+          minWidth: compact ? 0 : MIN_TOUCH_TARGET,
         },
         fullWidth && styles.fullWidth,
         style,
       ]}
     >
-      <View style={[styles.row, { gap: dims.gap }]}>
+      <View style={[styles.row, { gap: compact ? spacing.xs : dims.gap }]}>
         {loading ? (
           <ActivityIndicator size="small" color={content} />
         ) : (

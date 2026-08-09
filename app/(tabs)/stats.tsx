@@ -46,7 +46,7 @@ function Section({
     <View style={[styles.section, { paddingHorizontal: gutter }]}>
       <View style={styles.sectionHeader}>
         <Ionicons name={icon} size={20} color={colors.primary} />
-        <Text variant="titleLarge" color={colors.onSurface} accessibilityRole="header">
+        <Text variant="titleMedium" color={colors.onSurface} accessibilityRole="header">
           {title}
         </Text>
       </View>
@@ -151,7 +151,7 @@ export default function StatsScreen() {
         >
           <View style={styles.headerRow}>
             <Text
-              variant="headlineMedium"
+              variant="headlineSmall"
               color={colors.onSurface}
               accessibilityRole="header"
               style={styles.flexShrink}
@@ -509,8 +509,8 @@ const styles = StyleSheet.create({
   },
 
   header: {
-    paddingBottom: spacing.xl,
-    gap: spacing.xs,
+    paddingBottom: spacing.lg,
+    gap: spacing.xxs,
   },
   headerRow: {
     flexDirection: 'row',
@@ -533,12 +533,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: STAT_GAP,
-    marginBottom: spacing.xl,
+    marginBottom: spacing.lg,
   },
 
   section: {
-    marginBottom: spacing.xl,
-    gap: spacing.md,
+    marginBottom: spacing.lg,
+    gap: spacing.sm,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -547,7 +547,7 @@ const styles = StyleSheet.create({
   },
 
   chartCard: {
-    padding: spacing.lg,
+    padding: spacing.md,
   },
   barChart: {
     flexDirection: 'row',
@@ -599,9 +599,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
-    minHeight: 56,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    minHeight: 48,
   },
   rank: {
     width: 24,

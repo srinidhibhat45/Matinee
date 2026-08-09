@@ -666,11 +666,16 @@ export default function UpcomingScreen() {
 
   const renderUpcomingItem = useCallback(
     ({ item }: { item: TMDBMediaItem }) => {
+      // The year is dropped for releases inside the current year — on this
+      // screen almost everything is, so it was repeated noise crowding out the
+      // runtime on a narrow card.
       const releaseDate = item.releaseDate
         ? new Date(item.releaseDate).toLocaleDateString('en-US', {
             month: 'short',
             day: 'numeric',
-            year: 'numeric',
+            ...(new Date(item.releaseDate).getFullYear() === new Date().getFullYear()
+              ? {}
+              : { year: 'numeric' }),
           })
         : 'TBA';
 
@@ -745,10 +750,12 @@ export default function UpcomingScreen() {
               ) : null}
             </View>
 
+            {/* Metadata and actions sit side by side so the card's height is
+                set by the poster rather than by a stack of rows. */}
             <View style={styles.cardBody}>
               <View style={styles.titleRow}>
                 <Text
-                  variant="titleMedium"
+                  variant="titleSmall"
                   color={colors.onSurface}
                   numberOfLines={2}
                   style={styles.flexShrink}
@@ -764,16 +771,19 @@ export default function UpcomingScreen() {
                 ) : null}
               </View>
 
+              {/* Date and runtime share one line — split across two, they
+                  cost a row of height for no extra information. */}
               <View style={styles.metaRow}>
-                <Ionicons name="calendar-outline" size={14} color={colors.primary} />
-                <Text variant="labelLarge" color={colors.primary}>
+                <Ionicons name="calendar-outline" size={13} color={colors.primary} />
+                <Text
+                  variant="labelMedium"
+                  color={colors.primary}
+                  numberOfLines={1}
+                  style={styles.flexShrink}
+                >
                   {releaseDate}
+                  {runtimeStr ? `  ·  ${runtimeStr}` : ''}
                 </Text>
-                {runtimeStr ? (
-                  <Text variant="bodySmall" color={colors.onSurfaceVariant}>
-                    · {runtimeStr}
-                  </Text>
-                ) : null}
               </View>
 
               {genres ? (
@@ -782,12 +792,18 @@ export default function UpcomingScreen() {
                 </Text>
               ) : null}
 
+              {/* Badges and availability share one row. A badge is only shown
+                  when it tells the user something their own filters haven't
+                  already fixed — with Series off everything here is a movie,
+                  and with one language selected every title is in it. */}
               <View style={styles.badgeRow}>
-                <View style={[styles.pill, { backgroundColor: colors.secondaryContainer }]}>
-                  <Text variant="labelSmall" color={colors.onSecondaryContainer}>
-                    {typeLabel}
-                  </Text>
-                </View>
+                {showSeries ? (
+                  <View style={[styles.pill, { backgroundColor: colors.secondaryContainer }]}>
+                    <Text variant="labelSmall" color={colors.onSecondaryContainer}>
+                      {typeLabel}
+                    </Text>
+                  </View>
+                ) : null}
 
                 {item.upcomingEpisodeInfo ? (
                   <View style={[styles.pill, { backgroundColor: colors.tertiaryContainer }]}>
@@ -797,91 +813,102 @@ export default function UpcomingScreen() {
                   </View>
                 ) : null}
 
-                {item.originalLanguage ? (
+                {item.originalLanguage && selectedLanguages.length > 1 ? (
                   <View style={[styles.pill, { backgroundColor: colors.surfaceContainerHighest }]}>
                     <Text variant="labelSmall" color={colors.onSurfaceVariant}>
                       {langName}
                     </Text>
                   </View>
                 ) : null}
-              </View>
 
-              {/* Where to watch */}
-              {providers.length > 0 ? (
-                <View
-                  style={styles.providerRow}
-                  accessible
-                  accessibilityLabel={`Streaming on ${providers
-                    .map((p: any) => p.provider_name)
-                    .filter(Boolean)
-                    .join(', ')}`}
-                >
-                  {providers.map((p: any) => (
-                    <Image
-                      key={p.provider_id}
-                      source={{ uri: getImageUrl(p.logo_path, 'w92') || '' }}
-                      style={styles.providerLogo}
-                      accessible={false}
-                    />
-                  ))}
-                </View>
-              ) : (
-                <View style={styles.metaRow}>
-                  <Ionicons name="film-outline" size={13} color={colors.onSurfaceVariant} />
-                  <Text variant="labelMedium" color={colors.onSurfaceVariant}>
-                    In theatres
-                  </Text>
-                </View>
-              )}
-
-              {/* Actions */}
-              <View style={styles.actionRow}>
-                <Button
-                  label={isInterested ? 'On' : 'Remind'}
-                  icon={isInterested ? 'notifications' : 'notifications-outline'}
-                  variant={isInterested ? 'filled' : 'outlined'}
-                  size="small"
-                  onPress={() => handleInterested(item)}
-                  accessibilityLabel={
-                    isInterested
-                      ? `Turn off release reminder for ${item.title}`
-                      : `Remind me when ${item.title} is released`
-                  }
-                />
-                <Button
-                  label="Calendar"
-                  icon="calendar-outline"
-                  variant="text"
-                  size="small"
-                  onPress={() => handleAddToCalendar(item)}
-                  accessibilityLabel={`Add ${item.title} to your calendar`}
-                />
+                {providers.length > 0 ? (
+                  <View
+                    style={styles.providerRow}
+                    accessible
+                    accessibilityLabel={`Streaming on ${providers
+                      .map((p: any) => p.provider_name)
+                      .filter(Boolean)
+                      .join(', ')}`}
+                  >
+                    {providers.map((p: any) => (
+                      <Image
+                        key={p.provider_id}
+                        source={{ uri: getImageUrl(p.logo_path, 'w92') || '' }}
+                        style={styles.providerLogo}
+                        accessible={false}
+                      />
+                    ))}
+                  </View>
+                ) : (
+                  <View style={styles.inlineMeta}>
+                    <Ionicons name="film-outline" size={12} color={colors.onSurfaceVariant} />
+                    <Text variant="labelSmall" color={colors.onSurfaceVariant}>
+                      Theatres
+                    </Text>
+                  </View>
+                )}
               </View>
+            </View>
+
+            <View style={styles.actionCol}>
+              <Button
+                label={isInterested ? 'On' : 'Remind'}
+                icon={isInterested ? 'notifications' : 'notifications-outline'}
+                variant={isInterested ? 'filled' : 'outlined'}
+                size="small"
+                compact
+                fullWidth
+                onPress={() => handleInterested(item)}
+                accessibilityLabel={
+                  isInterested
+                    ? `Turn off release reminder for ${item.title}`
+                    : `Remind me when ${item.title} is released`
+                }
+              />
+              <Button
+                label="Calendar"
+                icon="calendar-outline"
+                variant="tonal"
+                size="small"
+                compact
+                fullWidth
+                onPress={() => handleAddToCalendar(item)}
+                accessibilityLabel={`Add ${item.title} to your calendar`}
+              />
             </View>
           </View>
         </Card>
       );
     },
-    [handleItemPress, handleItemLongPress, handleAddToCalendar, handleInterested, colors, dbStatusMap]
+    [
+      handleItemPress,
+      handleItemLongPress,
+      handleAddToCalendar,
+      handleInterested,
+      colors,
+      dbStatusMap,
+      selectedLanguages.length,
+      showSeries,
+    ]
   );
 
   const listContentStyle = {
     paddingHorizontal: gutter,
     paddingBottom: bottomPadding,
-    gap: spacing.md,
+    gap: spacing.sm,
   };
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + spacing.md, paddingHorizontal: gutter }]}>
-        <Text variant="headlineMedium" color={colors.onSurface} accessibilityRole="header">
+        <Text variant="headlineSmall" color={colors.onSurface} accessibilityRole="header">
           Upcoming
         </Text>
       </View>
 
       {/* Search */}
-      <View style={{ paddingHorizontal: gutter, paddingBottom: spacing.md }}>
+      <View style={{ paddingHorizontal: gutter, paddingBottom: spacing.sm }}>
         <SearchField
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -1052,10 +1079,10 @@ const styles = StyleSheet.create({
   },
 
   header: {
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.sm,
   },
   filterSection: {
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.sm,
   },
   searchNote: {
     flexDirection: 'row',
@@ -1067,31 +1094,37 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.sm,
   },
 
   cardRow: {
     flexDirection: 'row',
-    padding: spacing.md,
+    alignItems: 'flex-start',
+    padding: spacing.sm,
     gap: spacing.md,
   },
   poster: {
-    width: 80,
-    height: 120,
+    width: 68,
+    height: 102,
     borderRadius: shape.small,
   },
   premiereBadge: {
     position: 'absolute',
-    top: spacing.xs,
-    left: spacing.xs,
-    width: 22,
-    height: 22,
+    top: spacing.xxs,
+    left: spacing.xxs,
+    width: 18,
+    height: 18,
     borderRadius: shape.full,
     alignItems: 'center',
     justifyContent: 'center',
   },
   cardBody: {
     flex: 1,
+    gap: spacing.xxs,
+  },
+  /** Fixed-width action column; the buttons stretch to fill it. */
+  actionCol: {
+    width: 90,
     gap: spacing.xs,
   },
   titleRow: {
@@ -1103,14 +1136,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
-    flexWrap: 'wrap',
+  },
+  inlineMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
   },
   badgeRow: {
     flexDirection: 'row',
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: spacing.xs,
-    marginTop: spacing.xxs,
   },
   pill: {
     paddingHorizontal: spacing.sm,
@@ -1125,22 +1161,14 @@ const styles = StyleSheet.create({
   },
   providerRow: {
     flexDirection: 'row',
-    gap: spacing.xs,
-    marginTop: spacing.xxs,
+    alignItems: 'center',
+    gap: 3,
   },
   providerLogo: {
-    width: 26,
-    height: 26,
+    width: 22,
+    height: 22,
     borderRadius: shape.extraSmall,
   },
-  actionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.sm,
-  },
-
   sheetList: {
     marginHorizontal: -spacing.xl,
   },

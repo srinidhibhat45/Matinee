@@ -9,6 +9,7 @@ export {
   stateLayer,
   emphasisOpacity,
   motion,
+  density,
   MIN_TOUCH_TARGET,
   touchTargetSlop,
   lightScheme,

@@ -8,7 +8,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { shape, spacing, typescale, MIN_TOUCH_TARGET } from '../../constants/m3';
+import { density, shape, spacing, typescale, MIN_TOUCH_TARGET } from '../../constants/m3';
 import { useTheme } from '../../context/ThemeContext';
 import Text from './Text';
 import Touchable from './Touchable';
@@ -156,13 +156,13 @@ const styles = StyleSheet.create({
   box: {
     flexDirection: 'row',
     alignItems: 'center',
-    minHeight: MIN_TOUCH_TARGET + 8,
-    paddingHorizontal: spacing.lg,
+    minHeight: MIN_TOUCH_TARGET,
+    paddingHorizontal: spacing.md,
     gap: spacing.md,
   },
   input: {
     flex: 1,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
     // RN Android adds its own baseline padding that fights the M3 metrics.
     textAlignVertical: 'center',
   },
@@ -194,7 +194,8 @@ export interface SearchFieldProps {
 }
 
 /**
- * Material 3 search bar: a fully rounded `surfaceContainerHigh` pill, 56dp tall.
+ * Material 3 search bar: a fully rounded `surfaceContainerHigh` pill, drawn at
+ * the app's density (48dp) rather than M3's roomier 56dp default.
  */
 export function SearchField({
   value,
@@ -277,7 +278,7 @@ const search = StyleSheet.create({
   bar: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 56,
+    height: density.searchBar,
     borderRadius: shape.full,
     paddingHorizontal: spacing.lg,
     gap: spacing.md,

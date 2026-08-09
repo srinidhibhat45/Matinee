@@ -19,8 +19,8 @@ interface CarouselSectionProps {
 
 /** Cards grow with the window so wide layouts don't show a row of tiny posters. */
 const CARD_WIDTH = {
-  compact: { small: 112, medium: 144, large: 168 },
-  wide: { small: 132, medium: 168, large: 200 },
+  compact: { small: 100, medium: 128, large: 148 },
+  wide: { small: 120, medium: 152, large: 180 },
 } as const;
 
 /**
@@ -68,7 +68,7 @@ export default function CarouselSection({
     <View style={styles.container}>
       <View style={[styles.header, { paddingHorizontal: gutter }]}>
         <Text
-          variant="titleLarge"
+          variant="titleMedium"
           color={colors.onSurface}
           accessibilityRole="header"
           style={styles.title}
@@ -108,15 +108,15 @@ export default function CarouselSection({
 
 const styles = StyleSheet.create({
   container: {
-    marginBottom: spacing.xl,
+    marginBottom: spacing.lg,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.md,
+    marginBottom: spacing.sm,
     gap: spacing.sm,
-    minHeight: 40,
+    minHeight: 32,
   },
   title: {
     flexShrink: 1,

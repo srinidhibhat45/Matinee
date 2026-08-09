@@ -39,7 +39,7 @@ export default function EmptyState({
       accessibilityLabel={`${title}. ${subtitle}`}
     >
       <View style={[styles.iconCircle, { backgroundColor: colors.surfaceContainerHighest }]}>
-        <Ionicons name={icon as any} size={32} color={colors.onSurfaceVariant} />
+        <Ionicons name={icon as any} size={26} color={colors.onSurfaceVariant} />
       </View>
 
       <Text variant="titleMedium" color={colors.onSurface} style={styles.center}>
@@ -66,9 +66,9 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.xxl,
-    paddingVertical: spacing.xxl,
-    gap: spacing.sm,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.xl,
+    gap: spacing.xs,
   },
   compact: {
     // Not `flex: 0`: on React Native Web that resolves to `flex-basis: 0%`
@@ -79,8 +79,8 @@ const styles = StyleSheet.create({
     flexBasis: 'auto',
   },
   iconCircle: {
-    width: 72,
-    height: 72,
+    width: 56,
+    height: 56,
     borderRadius: shape.full,
     alignItems: 'center',
     justifyContent: 'center',

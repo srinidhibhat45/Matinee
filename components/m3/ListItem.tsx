@@ -1,7 +1,7 @@
 import React from 'react';
 import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { spacing } from '../../constants/m3';
+import { density, spacing } from '../../constants/m3';
 import { useTheme } from '../../context/ThemeContext';
 import Text from './Text';
 import Touchable from './Touchable';
@@ -32,9 +32,11 @@ export interface ListItemProps {
 /**
  * Material 3 list item — one, two or three lines depending on what is supplied.
  *
- * Row height follows the M3 minimums (56/72/88dp), all of which clear the 48dp
- * touch target, and the whole row is a single accessibility node so a screen
- * reader announces "Title, supporting text" rather than two separate stops.
+ * Row heights come from the app's density scale rather than M3's default
+ * 56/72/88, which wastes vertical space in the long settings and picker lists
+ * this app uses. Every step still clears the 48dp touch target. The whole row
+ * is one accessibility node, so a screen reader announces "Title, supporting
+ * text" instead of stopping twice.
  */
 export default function ListItem({
   headline,
@@ -59,7 +61,12 @@ export default function ListItem({
   const { colors } = useTheme();
 
   const lines = 1 + (supportingText ? 1 : 0) + (overline ? 1 : 0);
-  const minHeight = lines >= 3 ? 88 : lines === 2 ? 72 : 56;
+  const minHeight =
+    lines >= 3
+      ? density.listItem.threeLine
+      : lines === 2
+        ? density.listItem.twoLine
+        : density.listItem.oneLine;
 
   const headlineColor = disabled
     ? colors.outline
@@ -141,7 +148,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
     gap: spacing.lg,
   },
   leadingIcon: {

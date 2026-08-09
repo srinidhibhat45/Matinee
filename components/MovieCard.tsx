@@ -33,9 +33,9 @@ interface MovieCardProps {
 }
 
 const SIZE_CONFIG = {
-  small: { width: 112 },
-  medium: { width: 144 },
-  large: { width: 172 },
+  small: { width: 100 },
+  medium: { width: 128 },
+  large: { width: 148 },
 } as const;
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -221,7 +221,7 @@ const styles = StyleSheet.create({
     right: spacing.sm,
   },
   meta: {
-    marginTop: spacing.sm,
-    gap: 2,
+    marginTop: spacing.xs,
+    gap: 1,
   },
 });

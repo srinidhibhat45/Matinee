@@ -183,6 +183,36 @@ export const motion = {
 } as const;
 
 /* ------------------------------------------------------------------ *
+ * Density
+ * ------------------------------------------------------------------ */
+
+/**
+ * Component heights at the density this app uses.
+ *
+ * M3's default metrics are tuned for a comfortable touch target on a mostly
+ * empty screen. Matinee is the opposite: dense lists of posters and metadata
+ * where a comfortable 56dp row means two fewer titles on screen. M3 supports
+ * this explicitly through density levels, each shaving 4dp off a component.
+ *
+ * Everything here still clears {@link MIN_TOUCH_TARGET}, so the reduction
+ * comes out of decorative whitespace, never out of the touch target. Controls
+ * drawn smaller than 48dp — chips, small buttons — keep a 48dp target through
+ * `hitSlop` instead.
+ */
+export const density = {
+  /** Search bar. M3 default is 56. */
+  searchBar: 48,
+  /** List rows by line count. M3 defaults are 56 / 72 / 88. */
+  listItem: { oneLine: 48, twoLine: 60, threeLine: 76 },
+  /** Top app bar. M3 default is 64. */
+  appBar: 56,
+  /** Inner padding for a content card. M3 default is 16. */
+  cardPadding: spacing.md,
+  /** Vertical rhythm between major sections. M3 default is 24. */
+  sectionGap: spacing.lg,
+} as const;
+
+/* ------------------------------------------------------------------ *
  * Accessibility
  * ------------------------------------------------------------------ */
 

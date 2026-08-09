@@ -1007,22 +1007,12 @@ export default function DiscoverScreen() {
         />
       </View>
 
-      <View style={styles.genreSection}>
-        <Text
-          variant="titleSmall"
-          color={colors.onSurfaceVariant}
-          accessibilityRole="header"
-          style={{ paddingHorizontal: gutter, marginBottom: spacing.sm }}
-        >
-          Browse by genre
-        </Text>
-        <GenreChips
-          genres={genreList}
-          selectedIds={selectedGenres}
-          onToggle={handleGenreToggle}
-          gutter={gutter}
-        />
-      </View>
+      <GenreChips
+        genres={genreList}
+        selectedIds={selectedGenres}
+        onToggle={handleGenreToggle}
+        gutter={gutter}
+      />
     </View>
   );
 
@@ -1536,8 +1526,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: spacing.sm,
-    paddingBottom: spacing.sm,
-    minHeight: 64,
+    paddingBottom: spacing.xs,
+    minHeight: 52,
   },
   brandRow: {
     flexDirection: 'row',
@@ -1557,8 +1547,8 @@ const styles = StyleSheet.create({
 
   /* Search */
   searchArea: {
-    paddingBottom: spacing.md,
-    gap: spacing.md,
+    paddingBottom: spacing.sm,
+    gap: spacing.sm,
   },
   searchLeading: {
     marginLeft: -spacing.sm,
@@ -1571,15 +1561,12 @@ const styles = StyleSheet.create({
 
   /* Browse controls */
   browseControls: {
-    paddingTop: spacing.xs,
-    gap: spacing.lg,
-    marginBottom: spacing.lg,
+    paddingTop: spacing.xxs,
+    gap: spacing.md,
+    marginBottom: spacing.md,
   },
   fullWidthSegments: {
     alignSelf: 'stretch',
-  },
-  genreSection: {
-    gap: 0,
   },
 
   /* Feed */
@@ -1593,17 +1580,17 @@ const styles = StyleSheet.create({
   },
   resultRow: {
     flexDirection: 'row',
-    padding: spacing.md,
-    gap: spacing.lg,
+    padding: spacing.sm,
+    gap: spacing.md,
   },
   resultPoster: {
-    width: 84,
-    height: 126,
+    width: 72,
+    height: 108,
     borderRadius: shape.small,
   },
   resultInfo: {
     flex: 1,
-    gap: spacing.xs,
+    gap: spacing.xxs,
   },
   resultTitleRow: {
     flexDirection: 'row',
@@ -1641,8 +1628,8 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   gridMeta: {
-    marginTop: spacing.sm,
-    gap: 2,
+    marginTop: spacing.xs,
+    gap: 1,
   },
   overlayBadge: {
     position: 'absolute',
