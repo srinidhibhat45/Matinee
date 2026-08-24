@@ -23,7 +23,7 @@
     "android": {
       "package": "com.matinee.app",
       "adaptiveIcon": {
-        "backgroundColor": "#181213",
+        "backgroundColor": "#000000",
         "foregroundImage": "./assets/images/icon.png"
       },
       "permissions": [
@@ -45,14 +45,14 @@
           "backgroundColor": "#FFF8F7",
           "dark": {
             "image": "./assets/images/splash-icon.png",
-            "backgroundColor": "#181213"
+            "backgroundColor": "#000000"
           }
         }
       ],
       [
         "expo-notifications",
         {
-          "color": "#B80F55"
+          "color": "#007461"
         }
       ],
       "expo-sqlite",

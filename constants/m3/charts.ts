@@ -12,25 +12,25 @@
  */
 
 const DARK = [
-  '#FFB1C2', // pink   — brand
+  '#7CD6C6', // teal   — brand
   '#F7BB7E', // amber
   '#7BE08C', // green
   '#63D2E8', // cyan
   '#B9A6FF', // violet
   '#FFA463', // orange
-  '#5FDCC4', // teal
+  '#FFB1C2', // pink
   '#EBD24A', // yellow
   '#FF897D', // red
 ];
 
 const LIGHT = [
-  '#B80F55', // pink   — brand
+  '#007461', // teal   — brand
   '#825422', // amber
   '#20661F', // green
   '#00629A', // blue
   '#5A43C4', // violet
   '#9A4A00', // orange
-  '#00655B', // teal
+  '#B80F55', // pink
   '#6A5D00', // yellow
   '#B3261E', // red
 ];

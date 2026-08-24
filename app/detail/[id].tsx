@@ -40,6 +40,7 @@ import {
 } from '../../services/database';
 import { calendarService } from '../../services/calendar';
 import { notificationService } from '../../services/notifications';
+import { extractPeople } from '../../services/enrichment';
 import CarouselSection from '../../components/CarouselSection';
 import { getGenreName } from '../../constants/genres';
 import type { MediaType, CastMember, EpisodeRating } from '../../types';
@@ -531,27 +532,10 @@ export default function DetailScreen() {
       const existing = await getItem(tmdbId, mediaType);
       if (!existing) return;
 
-      const crew: any[] = details.crew ?? [];
-      const cast: any[] = details.cast ?? [];
-
-      const people = [
-        ...crew
-          .filter((c: any) => c.job === 'Director')
-          .map((d: any) => ({
-            itemId: existing.id,
-            personId: d.id,
-            personName: d.name,
-            role: 'director' as const,
-            profilePath: d.profile_path ?? null,
-          })),
-        ...cast.slice(0, 5).map((a: any) => ({
-          itemId: existing.id,
-          personId: a.id,
-          personName: a.name,
-          role: 'actor' as const,
-          profilePath: a.profile_path ?? null,
-        })),
-      ];
+      // Shared with the enrichment backfill so a title credits the same
+      // people whether it was saved here or filled in later — including the
+      // creator fallback that gives series a director at all.
+      const people = extractPeople(existing.id, details);
 
       if (people.length > 0) {
         await saveDirectorsActors(existing.id, people);
@@ -593,6 +577,12 @@ export default function DetailScreen() {
           genres: JSON.stringify(details.genreIds || details.genres?.map((g: any) => g.id) || []),
           originalLanguage: details.originalLanguage,
           runtime: details.runtime || 0,
+          // A series' `runtime` is one episode. Recording the episode and
+          // season counts alongside it is what lets watch time reflect the
+          // whole run rather than a single instalment.
+          episodeCount: details.numberOfEpisodes ?? null,
+          seasonCount: details.numberOfSeasons ?? null,
+          certification: details.certification ?? null,
           voteAverage: details.voteAverage,
           status,
           watchedDate: status === 'watched' ? new Date().toISOString().split('T')[0] : null,
@@ -645,6 +635,12 @@ export default function DetailScreen() {
           genres: JSON.stringify(details.genreIds || details.genres?.map((g: any) => g.id) || []),
           originalLanguage: details.originalLanguage,
           runtime: details.runtime || 0,
+          // A series' `runtime` is one episode. Recording the episode and
+          // season counts alongside it is what lets watch time reflect the
+          // whole run rather than a single instalment.
+          episodeCount: details.numberOfEpisodes ?? null,
+          seasonCount: details.numberOfSeasons ?? null,
+          certification: details.certification ?? null,
           voteAverage: details.voteAverage,
           status: 'watched',
           watchedDate: new Date().toISOString().split('T')[0],
@@ -741,6 +737,12 @@ export default function DetailScreen() {
           genres: JSON.stringify(details.genreIds || details.genres?.map((g: any) => g.id) || []),
           originalLanguage: details.originalLanguage,
           runtime: details.runtime || 0,
+          // A series' `runtime` is one episode. Recording the episode and
+          // season counts alongside it is what lets watch time reflect the
+          // whole run rather than a single instalment.
+          episodeCount: details.numberOfEpisodes ?? null,
+          seasonCount: details.numberOfSeasons ?? null,
+          certification: details.certification ?? null,
           voteAverage: details.voteAverage,
           status: 'watched',
           watchedDate: watchedDateStr,

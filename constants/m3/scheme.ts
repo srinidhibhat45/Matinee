@@ -106,6 +106,40 @@ export const lightScheme: M3ColorScheme = {
   rating: ratingScale.light,
 };
 
+/**
+ * Dark-mode surface ramp, re-anchored to true black.
+ *
+ * M3's stock dark surfaces sit around tone 6–22, which reads as charcoal grey.
+ * Matinee's dark theme is an OLED-black theme instead: the page is pure black
+ * and the container ladder climbs from there.
+ *
+ * The tones are not arbitrary. Each one is solved so its contrast ratio against
+ * the black page matches what the same role had against M3's grey page — the
+ * `surfaceContainerHigh` step, for instance, is 1.29:1 above the page in both
+ * schemes. Dropping the page to black without re-solving would have flattened
+ * every step, leaving cards and sheets barely separable from the background.
+ *
+ * Each entry's lightness and chroma are carried over unchanged from that
+ * solve; only hue is rotated to match whatever `neutral`'s current brand hue
+ * is (teal, as of this writing). That keeps the ladder in the same family as
+ * the rest of the scheme instead of drifting toward whatever hue the brand
+ * used to be — this table does NOT update automatically when the brand colour
+ * changes, since it isn't derived from the `neutral` ramp at runtime. Rotate
+ * it by hand (see the hue-transplant approach used when the palette itself
+ * changes) whenever `constants/m3/palettes.ts` changes hue.
+ */
+const blackSurfaces = {
+  background: '#000000',
+  surface: '#000000',
+  surfaceDim: '#000000',
+  surfaceBright: '#263332',
+  surfaceContainerLowest: '#000000',
+  surfaceContainerLow: '#0B0E0E',
+  surfaceContainer: '#0F1413',
+  surfaceContainerHigh: '#192220',
+  surfaceContainerHighest: '#222E2C',
+} as const;
+
 export const darkScheme: M3ColorScheme = {
   primary: P[80],
   onPrimary: P[20],
@@ -127,19 +161,19 @@ export const darkScheme: M3ColorScheme = {
   errorContainer: E[30],
   onErrorContainer: E[90],
 
-  background: N[6],
+  background: blackSurfaces.background,
   onBackground: N[90],
-  surface: N[6],
+  surface: blackSurfaces.surface,
   onSurface: N[90],
-  surfaceVariant: NV[30],
+  surfaceVariant: NV[24],
   onSurfaceVariant: NV[80],
-  surfaceDim: N[6],
-  surfaceBright: N[24],
-  surfaceContainerLowest: N[4],
-  surfaceContainerLow: N[10],
-  surfaceContainer: N[12],
-  surfaceContainerHigh: N[17],
-  surfaceContainerHighest: N[22],
+  surfaceDim: blackSurfaces.surfaceDim,
+  surfaceBright: blackSurfaces.surfaceBright,
+  surfaceContainerLowest: blackSurfaces.surfaceContainerLowest,
+  surfaceContainerLow: blackSurfaces.surfaceContainerLow,
+  surfaceContainer: blackSurfaces.surfaceContainer,
+  surfaceContainerHigh: blackSurfaces.surfaceContainerHigh,
+  surfaceContainerHighest: blackSurfaces.surfaceContainerHighest,
 
   outline: NV[60],
   outlineVariant: NV[30],

@@ -69,6 +69,24 @@ export default function Touchable({
     };
   }, [rest.accessibilityState, disabled]);
 
+  /**
+   * `togglebutton` is a React Native role, not an ARIA one. React Native Web
+   * forwards it verbatim, so the browser gets `role="togglebutton"` — which no
+   * screen reader understands — and renders a plain `<div>` instead of the
+   * `<button>` a recognised role would produce, costing the control its
+   * keyboard semantics. On web it becomes a button whose on/off state is
+   * carried by `aria-pressed`, the ARIA equivalent. Native is untouched and
+   * keeps the role it actually supports.
+   */
+  const webRoleProps = useMemo(() => {
+    if (Platform.OS !== 'web') return null;
+    if (rest.accessibilityRole !== 'togglebutton') return null;
+    return {
+      accessibilityRole: 'button' as const,
+      'aria-pressed': rest.accessibilityState?.selected ?? false,
+    };
+  }, [rest.accessibilityRole, rest.accessibilityState]);
+
   return (
     <Pressable
       android_ripple={androidRipple}
@@ -76,6 +94,7 @@ export default function Touchable({
       {...ariaProps}
       style={style}
       {...rest}
+      {...webRoleProps}
     >
       {({ pressed }: any) => (
         <>

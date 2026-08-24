@@ -59,7 +59,20 @@ export interface TMDBMediaItem {
   watchProviders?: WatchProviderResult | null;
   upcomingEventTitle?: string;
   upcomingEpisodeInfo?: string;
+  /**
+   * How well this result answers the query that produced it. Only set on
+   * search results; see `scoreSearchRelevance` in `services/tmdb.ts`.
+   */
+  relevance?: number;
+  /**
+   * Which arm of the search produced this result — a direct title match, a
+   * genre-name expansion, or a person's filmography. Direct matches outrank
+   * the expansions.
+   */
+  matchSource?: SearchMatchSource;
 }
+
+export type SearchMatchSource = 'title' | 'genre' | 'person';
 
 // ─── Detail Types ────────────────────────────────────────────
 
@@ -122,7 +135,18 @@ export interface WatchedItem {
   releaseDate: string;
   genres: string;
   originalLanguage: string;
+  /** Minutes. For a series this is one episode, not the whole run. */
   runtime: number;
+  /** Total episodes across all seasons. Series only. */
+  episodeCount?: number | null;
+  /** Total seasons. Series only. */
+  seasonCount?: number | null;
+  /**
+   * Minutes of viewing this title represents in total — a film's runtime, or a
+   * series' episode runtime times its episode count. This is what watch-time
+   * statistics are summed from.
+   */
+  totalRuntime?: number | null;
   voteAverage: number;
   status: ItemStatus;
   watchedDate: string | null;
@@ -163,6 +187,8 @@ export interface UserStats {
   totalMovies: number;
   totalSeries: number;
   totalHoursWatched: number;
+  /** How many of `totalWatched` had a known length. See `WatchStats`. */
+  titlesWithRuntime: number;
   averageRating: number;
   favoriteGenres: { genre: string; count: number }[];
   topDirectors: { name: string; count: number }[];
@@ -229,7 +255,18 @@ export interface TMDBMediaDetails extends TMDBMediaItem {
   originalTitle: string;
   adult: boolean;
   genres: Genre[];
+  /**
+   * Minutes. For a series this is one episode, and it may be an estimate —
+   * see `episodeRunTimeMinutes` for whether TMDB actually stated it.
+   */
   runtime: number | null;
+  /**
+   * The series-level `episode_run_time` TMDB published, or null when it
+   * published none. Distinguishing this from `runtime` is what lets a caller
+   * know the length is a guess and worth refining from real episode data.
+   * Always null for films.
+   */
+  episodeRunTimeMinutes: number | null;
   numberOfSeasons: number | null;
   numberOfEpisodes: number | null;
   status: string;
@@ -242,6 +279,13 @@ export interface TMDBMediaDetails extends TMDBMediaItem {
   cast: CastMember[];
   crew: CrewMember[];
   director: string | null;
+  /**
+   * A series' creators. TV rarely carries a series-level "Director" crew
+   * credit, so this is the equivalent authorship signal — and unlike the
+   * `director` string it keeps the person id, which is what statistics and
+   * the recommendation engine key on. Empty for films.
+   */
+  createdBy: { id: number; name: string; profile_path: string | null }[];
   recommendations: TMDBMediaItem[];
   similar: TMDBMediaItem[];
   keywords: Keyword[];
@@ -279,6 +323,12 @@ export interface DiscoverFilters {
   year?: number;
   sortBy?: string;
   voteAverageGte?: number;
+  /**
+   * Minimum number of votes. The main defence against TMDB's popularity
+   * metric, which rewards sheer volume of activity and so ranks long-running
+   * daily serials above almost every film ever made.
+   */
+  voteCountGte?: number;
   withCast?: string;
   withCrew?: string;
   releaseDateGte?: string;

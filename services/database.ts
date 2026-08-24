@@ -47,6 +47,13 @@ export interface WatchStats {
   totalSeries: number;
   totalHours: number;
   averageRating: number;
+  /**
+   * How many of the watched titles had a known length. Anything TMDB has not
+   * been asked about yet contributes nothing to `totalHours`, so this is what
+   * tells the difference between "you watched 12 hours" and "we only know
+   * about 12 hours of what you watched".
+   */
+  titlesWithRuntime: number;
 }
 
 export interface GenreCount {
@@ -151,6 +158,11 @@ export async function initDatabase(): Promise<void> {
         genres            TEXT    DEFAULT '[]',
         original_language TEXT,
         runtime           INTEGER,
+        -- For a series, runtime is one episode's length. episode_count and
+        -- total_runtime carry the whole run; see getWatchStats().
+        episode_count     INTEGER,
+        season_count      INTEGER,
+        total_runtime     INTEGER,
         vote_average      REAL,
         status            TEXT    NOT NULL DEFAULT 'watched'
                           CHECK (status IN ('watched', 'watchlist', 'interested', 'not_interested')),
@@ -241,6 +253,40 @@ export async function initDatabase(): Promise<void> {
         await db.execAsync('ALTER TABLE watched_items ADD COLUMN certification TEXT;');
       } catch (err) {
         // Ignored if column already exists
+      }
+
+      // Migration: carry a series' full length, not one episode's.
+      //
+      // `runtime` for a TV item is `episode_run_time[0]` — a single episode.
+      // Summing that column called Game of Thrones an hour of viewing, so the
+      // "hours watched" figure was short by a factor of however many episodes
+      // the user's series actually have. These columns hold the real totals;
+      // `services/enrichment.ts` fills them in for titles saved before this.
+      for (const column of [
+        'episode_count INTEGER',
+        'season_count INTEGER',
+        'total_runtime INTEGER',
+      ]) {
+        try {
+          await db.execAsync(`ALTER TABLE watched_items ADD COLUMN ${column};`);
+        } catch (err) {
+          // Ignored if column already exists
+        }
+      }
+
+      // Backfill the movies, which need no network call: a film's total
+      // runtime is simply its runtime.
+      try {
+        await db.execAsync(
+          `UPDATE watched_items
+              SET total_runtime = runtime
+            WHERE media_type = 'movie'
+              AND total_runtime IS NULL
+              AND runtime IS NOT NULL
+              AND runtime > 0;`
+        );
+      } catch (err) {
+        console.error('[Matinee DB] Failed to backfill movie runtimes:', err);
       }
 
       // Migration: Add is_dismissed column to in_app_notifications if it doesn't exist
@@ -546,6 +592,9 @@ interface WatchedItemRow {
   genres: string;
   original_language: string;
   runtime: number;
+  episode_count?: number | null;
+  season_count?: number | null;
+  total_runtime?: number | null;
   vote_average: number;
   status: string;
   watched_date: string | null;
@@ -568,6 +617,9 @@ function rowToWatchedItem(row: WatchedItemRow): WatchedItem {
     genres: row.genres,
     originalLanguage: row.original_language,
     runtime: row.runtime,
+    episodeCount: row.episode_count ?? null,
+    seasonCount: row.season_count ?? null,
+    totalRuntime: row.total_runtime ?? null,
     voteAverage: row.vote_average,
     status: row.status as ItemStatus,
     watchedDate: row.watched_date,
@@ -612,25 +664,83 @@ function rowToRating(row: RatingRow): Rating {
 //  WATCHED ITEMS – CRUD
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/**
+ * How many minutes of viewing an item represents.
+ *
+ * A film is its runtime. A series is one episode's runtime times its episode
+ * count — `runtime` alone is a single episode, which is why summing that
+ * column reported a whole series as under an hour.
+ *
+ * Returns null rather than guessing when the episode count is unknown;
+ * `services/enrichment.ts` fills those in from TMDB afterwards.
+ */
+export function deriveTotalRuntime(item: {
+  mediaType: MediaType;
+  runtime?: number | null;
+  episodeCount?: number | null;
+  totalRuntime?: number | null;
+}): number | null {
+  if (item.totalRuntime && item.totalRuntime > 0) return item.totalRuntime;
+  if (!item.runtime || item.runtime <= 0) return null;
+  if (item.mediaType === 'movie') return item.runtime;
+  if (!item.episodeCount || item.episodeCount <= 0) return null;
+  return item.runtime * item.episodeCount;
+}
+
+/**
+ * The total runtime to store when a title is saved.
+ *
+ * A film's is simply its runtime. A series' is deliberately left null unless
+ * the caller states one: establishing it needs a real episode length, and the
+ * value a screen has to hand may be TMDB's last-aired-episode fallback, which
+ * is usually a finale and so runs long. Writing that here would freeze a
+ * skewed number in place — and because the enrichment pass only visits rows
+ * with no total, it would never be corrected. Leaving it null hands the job to
+ * `services/enrichment.ts`, which samples a season to get it right.
+ */
+function totalRuntimeOnSave(
+  item: NewWatchedItem,
+  existing?: WatchedItem,
+): number | null {
+  if (item.totalRuntime && item.totalRuntime > 0) return item.totalRuntime;
+  if (item.mediaType !== 'movie') return null;
+  return item.runtime || existing?.runtime || null;
+}
+
 export async function addItem(item: NewWatchedItem): Promise<number> {
   const database = await getDbAsync();
   try {
     const existing = await getItem(item.tmdbId, item.mediaType);
     if (existing) {
-      await updateItem(existing.id, {
+      // Only status and date were carried over before. Titles first saved
+      // from a poster long-press arrive with `runtime: 0`, and re-saving them
+      // as watched left that zero in place forever — so they contributed
+      // nothing to watch time no matter how often they were re-logged.
+      // Anything the caller now knows and the row does not is filled in.
+      const upgrades: WatchedItemUpdate = {
         status: item.status,
         watchedDate: item.watchedDate,
         updatedAt: new Date().toISOString(),
-      });
+      };
+      if (!existing.runtime && item.runtime) upgrades.runtime = item.runtime;
+      if (!existing.episodeCount && item.episodeCount) upgrades.episodeCount = item.episodeCount;
+      if (!existing.seasonCount && item.seasonCount) upgrades.seasonCount = item.seasonCount;
+
+      const nextTotal = totalRuntimeOnSave(item, existing);
+      if (!existing.totalRuntime && nextTotal) upgrades.totalRuntime = nextTotal;
+      if (!existing.certification && item.certification) upgrades.certification = item.certification;
+
+      await updateItem(existing.id, upgrades);
       return existing.id;
     }
 
     const result = await database.runAsync(
       `INSERT INTO watched_items
         (tmdb_id, media_type, title, poster_path, backdrop_path, overview,
-         release_date, genres, original_language, runtime, vote_average,
+         release_date, genres, original_language, runtime, episode_count,
+         season_count, total_runtime, vote_average,
          status, watched_date, certification)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         item.tmdbId,
         item.mediaType,
@@ -642,6 +752,9 @@ export async function addItem(item: NewWatchedItem): Promise<number> {
         item.genres ?? '[]',
         item.originalLanguage ?? null,
         item.runtime ?? null,
+        item.episodeCount ?? null,
+        item.seasonCount ?? null,
+        totalRuntimeOnSave(item),
         item.voteAverage ?? null,
         item.status,
         item.watchedDate ?? null,
@@ -681,6 +794,9 @@ export async function updateItem(
     genres: 'genres',
     originalLanguage: 'original_language',
     runtime: 'runtime',
+    episodeCount: 'episode_count',
+    seasonCount: 'season_count',
+    totalRuntime: 'total_runtime',
     voteAverage: 'vote_average',
     status: 'status',
     watchedDate: 'watched_date',
@@ -1418,12 +1534,22 @@ export async function getTopActors(
 export async function getWatchStats(year?: number): Promise<WatchStats> {
   const database = await getDbAsync();
   try {
+    // Watch time comes from `total_runtime`, which holds a film's runtime or a
+    // series' episode runtime times its episode count. Summing `runtime`
+    // directly (the previous behaviour) counted one episode per series, which
+    // is how a library containing Game of Thrones and House of the Dragon
+    // added up to fewer hours than those two shows alone.
+    //
+    // `total_runtime` is null for anything TMDB has not been asked about yet;
+    // `countedTitles` reports how much of the library the figure covers so the
+    // stats screen can say so rather than quietly under-reporting.
     let query = `
       SELECT
          COUNT(*)                                               AS totalWatched,
          SUM(CASE WHEN media_type = 'movie' THEN 1 ELSE 0 END) AS totalMovies,
          SUM(CASE WHEN media_type = 'tv'    THEN 1 ELSE 0 END) AS totalSeries,
-         COALESCE(SUM(runtime), 0)                              AS totalMinutes
+         COALESCE(SUM(total_runtime), 0)                        AS totalMinutes,
+         SUM(CASE WHEN total_runtime > 0 THEN 1 ELSE 0 END)     AS countedTitles
       FROM watched_items
       WHERE status = 'watched'
     `;
@@ -1437,6 +1563,7 @@ export async function getWatchStats(year?: number): Promise<WatchStats> {
       totalMovies: number;
       totalSeries: number;
       totalMinutes: number;
+      countedTitles: number;
     }>(query, params);
 
     // Calculate average rating
@@ -1459,10 +1586,18 @@ export async function getWatchStats(year?: number): Promise<WatchStats> {
       totalSeries: row?.totalSeries ?? 0,
       totalHours: Math.round((row?.totalMinutes ?? 0) / 60),
       averageRating: avgRow?.averageRating ?? 0,
+      titlesWithRuntime: row?.countedTitles ?? 0,
     };
   } catch (error) {
     console.error('[Matinee DB] getWatchStats failed:', error);
-    return { totalWatched: 0, totalMovies: 0, totalSeries: 0, totalHours: 0, averageRating: 0 };
+    return {
+      totalWatched: 0,
+      totalMovies: 0,
+      totalSeries: 0,
+      totalHours: 0,
+      averageRating: 0,
+      titlesWithRuntime: 0,
+    };
   }
 }
 
@@ -1983,6 +2118,90 @@ export async function getWatchedPeople(): Promise<PersonEntry[]> {
   } catch (error) {
     console.error('[Matinee DB] getWatchedPeople failed:', error);
     return [];
+  }
+}
+
+/**
+ * Watched titles the stats screen cannot fully account for.
+ *
+ * Two things go missing. Length: anything saved from a poster long-press or a
+ * CSV import arrives with `runtime: 0`, and every series ever saved recorded
+ * one episode rather than its whole run. People: `director_actor_cache` was
+ * only ever written from the detail screen, so a title marked watched from a
+ * grid, from Upcoming, or from an import contributed nobody — which is why the
+ * top directors and actors lists bore no resemblance to what the user watches.
+ *
+ * `services/enrichment.ts` walks this list and fills both in from TMDB.
+ */
+export async function getItemsNeedingEnrichment(limit = 40): Promise<WatchedItem[]> {
+  const database = await getDbAsync();
+  try {
+    const rows = await database.getAllAsync<WatchedItemRow>(
+      `SELECT w.*
+         FROM watched_items w
+        WHERE w.status = 'watched'
+          AND (
+                w.total_runtime IS NULL
+             OR w.total_runtime <= 0
+             OR NOT EXISTS (
+                  SELECT 1 FROM director_actor_cache d WHERE d.item_id = w.id
+                )
+          )
+        -- Most recently logged first: those are the titles the user is most
+        -- likely looking at the stats for right now.
+        ORDER BY COALESCE(w.watched_date, w.updated_at) DESC
+        LIMIT ?`,
+      [limit]
+    );
+    return rows.map(rowToWatchedItem);
+  } catch (error) {
+    console.error('[Matinee DB] getItemsNeedingEnrichment failed:', error);
+    return [];
+  }
+}
+
+/** How many watched titles are still missing length or people data. */
+export async function countItemsNeedingEnrichment(): Promise<number> {
+  const database = await getDbAsync();
+  try {
+    const row = await database.getFirstAsync<{ pending: number }>(
+      `SELECT COUNT(*) AS pending
+         FROM watched_items w
+        WHERE w.status = 'watched'
+          AND (
+                w.total_runtime IS NULL
+             OR w.total_runtime <= 0
+             OR NOT EXISTS (
+                  SELECT 1 FROM director_actor_cache d WHERE d.item_id = w.id
+                )
+          )`
+    );
+    return row?.pending ?? 0;
+  } catch (error) {
+    console.error('[Matinee DB] countItemsNeedingEnrichment failed:', error);
+    return 0;
+  }
+}
+
+/**
+ * A short stamp that changes whenever the library does.
+ *
+ * Used as part of the recommendation cache key so a cached feed survives tab
+ * switches and app restarts but is dropped the moment the user rates,
+ * watchlists or dismisses anything — the events that should actually change
+ * what gets recommended.
+ */
+export async function getLibraryVersion(): Promise<string> {
+  const database = await getDbAsync();
+  try {
+    const row = await database.getFirstAsync<{ total: number; latest: string | null }>(
+      `SELECT COUNT(*) AS total, MAX(updated_at) AS latest FROM watched_items`
+    );
+    return `${row?.total ?? 0}@${row?.latest ?? 'none'}`;
+  } catch (error) {
+    console.error('[Matinee DB] getLibraryVersion failed:', error);
+    // A unique value degrades to "never cached", which is the safe direction.
+    return `unknown@${Date.now()}`;
   }
 }
 

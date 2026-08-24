@@ -13,6 +13,11 @@ interface StatCardProps {
   onPress?: () => void;
   /** Set by the responsive grid; omit to let the card fill its parent. */
   width?: number;
+  /**
+   * A short qualifier under the label, for a figure that is known to be
+   * partial. Saying so is better than showing a confidently wrong number.
+   */
+  note?: string;
 }
 
 /**
@@ -29,6 +34,7 @@ export default function StatCard({
   color,
   onPress,
   width,
+  note,
 }: StatCardProps) {
   const { colors } = useTheme();
   const iconColor = color ?? colors.primary;
@@ -39,7 +45,7 @@ export default function StatCard({
       onPress={onPress}
       radius={shape.large}
       style={[styles.card, width ? { width } : styles.flexible]}
-      accessibilityLabel={`${value} ${label}`}
+      accessibilityLabel={[`${value} ${label}`, note].filter(Boolean).join(', ')}
       accessibilityHint={onPress ? `Opens ${label}` : undefined}
     >
       <View style={styles.body}>
@@ -52,6 +58,11 @@ export default function StatCard({
         <Text variant="bodyMedium" color={colors.onSurfaceVariant} numberOfLines={2}>
           {label}
         </Text>
+        {note ? (
+          <Text variant="labelSmall" color={colors.outline} numberOfLines={2}>
+            {note}
+          </Text>
+        ) : null}
       </View>
     </Card>
   );

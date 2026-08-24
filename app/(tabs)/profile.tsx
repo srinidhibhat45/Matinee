@@ -37,7 +37,7 @@ import {
 } from '../../components/m3';
 import ThemeSwitch from '../../components/ThemeSwitch';
 import EmptyState from '../../components/EmptyState';
-import { getImageUrl, tmdbService } from '../../services/tmdb';
+import { getImageUrl, tmdbService, invalidateTmdbSettingsCache } from '../../services/tmdb';
 import {
   exportUserData,
   getAllItems,
@@ -440,6 +440,9 @@ export default function ProfileScreen() {
       const next = !includeAdult;
       setIncludeAdult(next);
       await setPreference('PREF_ADULT_CONTENT', String(next));
+      // The TMDB layer memoises this flag; without this the toggle would not
+      // reach a request until the app restarted.
+      invalidateTmdbSettingsCache();
     } catch (err) {
       console.error('Save adult content pref error:', err);
     }
@@ -652,6 +655,7 @@ export default function ProfileScreen() {
       await setPreference('API_KEY_STORAGE', '');
       await setPreference('PREF_LANGUAGES', DEFAULT_LANGUAGES.join(','));
       await setPreference('PREF_ADULT_CONTENT', 'false');
+      invalidateTmdbSettingsCache();
       await setPreference('PREF_FILTER_BY_COUNTRY', 'false');
       await setPreference('PREF_USER_COUNTRY', 'US');
       await setPreference('PREF_OTT_PROVIDERS', '');

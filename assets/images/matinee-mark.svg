@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100">
+  <defs>
+    <!-- userSpaceOnUse so every fill samples the SAME sweep across the whole
+         mark; with the default objectBoundingBox each sprocket hole would get
+         its own miniature gradient and stop matching the tile behind it. -->
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="18" y1="18" x2="82" y2="82">
+      <stop offset="0%" stop-color="#2FB8EE"/>
+      <stop offset="50%" stop-color="#00AC92"/>
+      <stop offset="100%" stop-color="#005849"/>
+    </linearGradient>
+    <mask id="film">
+      <rect x="0" y="0" width="100" height="100" fill="black"/>
+      <g transform="translate(4.2855,4.2855) scale(0.9143)">
+        <path fill="white" d="M26 34 C26 29.5, 29.5 26, 34 26 C38.5 26, 42 29.5, 42 34 V44 L50 54 L58 44 V34 C58 29.5, 61.5 26, 66 26 C70.5 26, 74 29.5, 74 34 V66 C74 70.5, 70.5 74, 66 74 C61.5 74, 58 70.5, 58 66 V56 L50 64 L42 56 V66 C42 70.5, 38.5 74, 34 74 C29.5 74, 26 70.5, 26 66 Z"/>
+        <g fill="black">
+          <rect x="32" y="31" width="4" height="6" rx="1.5"/>
+          <rect x="32" y="41" width="4" height="6" rx="1.5"/>
+          <rect x="32" y="51" width="4" height="6" rx="1.5"/>
+          <rect x="32" y="61" width="4" height="6" rx="1.5"/>
+          <rect x="64" y="31" width="4" height="6" rx="1.5"/>
+          <rect x="64" y="41" width="4" height="6" rx="1.5"/>
+          <rect x="64" y="51" width="4" height="6" rx="1.5"/>
+          <rect x="64" y="61" width="4" height="6" rx="1.5"/>
+        </g>
+      </g>
+    </mask>
+  </defs>
+  <rect x="18" y="18" width="64" height="64" rx="16.5" fill="url(#g)"/>
+  <rect x="18" y="18" width="64" height="64" rx="16.5" fill="#FFFDF6" mask="url(#film)"/>
+</svg>

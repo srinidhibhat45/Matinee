@@ -64,6 +64,16 @@ const GRID_GAP = spacing.md;
 
 type TabType = 'all' | 'movies' | 'series';
 
+type SearchSortBy = 'relevance' | 'popularity' | 'rating' | 'newest' | 'oldest';
+
+const SEARCH_SORT_OPTIONS: { label: string; value: SearchSortBy }[] = [
+  { label: 'Best match', value: 'relevance' },
+  { label: 'Popularity', value: 'popularity' },
+  { label: 'Rating', value: 'rating' },
+  { label: 'Newest', value: 'newest' },
+  { label: 'Oldest', value: 'oldest' },
+];
+
 const MEDIA_TABS: { value: TabType; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'movies', label: 'Movies' },
@@ -106,7 +116,13 @@ export default function DiscoverScreen() {
   const [searchPage, setSearchPage] = useState(1);
   const [searchTotalPages, setSearchTotalPages] = useState(1);
   const [isSearchingMore, setIsSearchingMore] = useState(false);
-  const [searchSortBy, setSearchSortBy] = useState<'popularity' | 'rating' | 'newest' | 'oldest'>('popularity');
+  /**
+   * Relevance is the default, and it is the only ordering that answers the
+   * question the user asked. Defaulting to popularity meant a specific search
+   * was re-sorted by fame the moment it arrived, so the exact title you typed
+   * sank beneath every better-known result that merely shared a word with it.
+   */
+  const [searchSortBy, setSearchSortBy] = useState<SearchSortBy>('relevance');
   const [searchMediaType, setSearchMediaType] = useState<'all' | 'movie' | 'tv'>('all');
   const [searchLang, setSearchLang] = useState<string>('all');
   const [isFilterSheetVisible, setIsFilterSheetVisible] = useState(false);
@@ -256,29 +272,33 @@ export default function DiscoverScreen() {
         recsPromise = recommendationService.getPersonalizedRecommendations(120, mediaType);
       }
 
-      const [trendingRes, popularRes, topRatedRes, recentRes, recsRes] = await Promise.allSettled([
-        trendingPromise,
-        popularPromise,
-        topRatedPromise,
-        getRecentItems(10),
-        recsPromise,
-      ]);
+      // Each rail publishes itself the moment its own data lands.
+      //
+      // Awaiting all five together meant the whole screen waited on the
+      // slowest one — and the slowest is the recommendation feed, which can
+      // take dozens of requests to build. The rails are independent, so there
+      // is no reason for trending to be held back by it.
+      const railsSettled: Promise<unknown>[] = [];
 
-      if (trendingRes.status === 'fulfilled') {
-        setTrending(prepareRail(trendingRes.value?.results || []));
-      }
-      if (popularRes.status === 'fulfilled') {
-        setPopular(prepareRail(popularRes.value?.results || []));
-      }
-      if (topRatedRes.status === 'fulfilled') {
-        setTopRated(prepareRail(topRatedRes.value?.results || []));
-      }
-      if (recentRes.status === 'fulfilled') {
-        const items = recentRes.value || [];
+      const publish = <T,>(promise: Promise<T>, apply: (value: T) => void) => {
+        railsSettled.push(
+          promise.then(apply).catch((err) => {
+            // A rail that fails simply stays empty; it must not take the
+            // others down with it.
+            console.warn('[Home] Rail failed:', err);
+          })
+        );
+      };
+
+      publish(trendingPromise, (res: any) => setTrending(prepareRail(res?.results || [])));
+      publish(popularPromise, (res: any) => setPopular(prepareRail(res?.results || [])));
+      publish(topRatedPromise, (res: any) => setTopRated(prepareRail(res?.results || [])));
+
+      publish(getRecentItems(10), (items: any) => {
         // Recently logged movies/shows are EXEMPT from preferred language filtering
         setRecentlyWatched(
           uniqueList(
-            items
+            (items || [])
               .filter((i: any) => activeTab === 'all' || i.mediaType === (activeTab === 'series' ? 'tv' : 'movie'))
               .map((i: any) => ({
                 id: i.tmdbId,
@@ -290,17 +310,24 @@ export default function DiscoverScreen() {
               }))
           )
         );
-      }
-      if (recsRes.status === 'fulfilled') {
-        const recs = recsRes.value || [];
+      });
+
+      publish(recsPromise, (recs: RecommendedItem[]) => {
         setRecommendations(
           uniqueList(
-            recs.filter(
+            (recs || []).filter(
               (r: RecommendedItem) => !skipKeys.has(`${r.mediaType || 'movie'}-${r.id}`)
             )
           )
         );
-      }
+      });
+
+      // The spinner clears as soon as the first rail has something to show,
+      // rather than when the last one finishes.
+      await Promise.race(railsSettled);
+      setHomeLoading(false);
+
+      await Promise.all(railsSettled);
       lastFetchedRef.current = Date.now();
     } catch (err) {
       console.error('Home data fetch error:', err);
@@ -601,9 +628,12 @@ export default function DiscoverScreen() {
       }
 
       setIsSearching(true);
+      // 400ms was long enough to feel like lag on top of the request itself.
+      // Responses are cached and stale ones are discarded by request id, so a
+      // tighter window costs little beyond a few extra cache hits.
       searchTimer.current = setTimeout(() => {
         runSearch(query, searchMediaType);
-      }, 400);
+      }, 220);
     },
     [runSearch, searchMediaType]
   );
@@ -672,7 +702,11 @@ export default function DiscoverScreen() {
       list = list.filter((item) => item.originalLanguage === searchLang);
     }
 
-    if (searchSortBy === 'popularity') {
+    if (searchSortBy === 'relevance') {
+      // The service already ranks the page; this keeps the order stable after
+      // later pages are merged in.
+      list.sort((a, b) => (b.relevance ?? 0) - (a.relevance ?? 0));
+    } else if (searchSortBy === 'popularity') {
       list.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
     } else if (searchSortBy === 'rating') {
       list.sort((a, b) => (b.voteAverage || 0) - (a.voteAverage || 0));
@@ -749,7 +783,7 @@ export default function DiscoverScreen() {
     setIsSearchFocused(false);
     setSearchPage(1);
     setSearchTotalPages(1);
-    setSearchSortBy('popularity');
+    setSearchSortBy('relevance');
     setSearchMediaType('all');
     setSearchLang('all');
   }, []);
@@ -992,7 +1026,7 @@ export default function DiscoverScreen() {
   );
 
   const hasActiveSearchFilters =
-    searchMediaType !== 'all' || searchSortBy !== 'popularity' || searchLang !== 'all';
+    searchMediaType !== 'all' || searchSortBy !== 'relevance' || searchLang !== 'all';
 
   /** Media-type / genre controls shared by the feed and the genre grid. */
   const browseControls = (
@@ -1140,18 +1174,14 @@ export default function DiscoverScreen() {
             {/* Active filters, each removable */}
             {searchQuery.trim() && hasActiveSearchFilters ? (
               <View style={styles.filterChipsRow}>
-                {searchSortBy !== 'popularity' ? (
+                {searchSortBy !== 'relevance' ? (
                   <Chip
                     variant="input"
                     label={`Sort: ${
-                      searchSortBy === 'rating'
-                        ? 'Rating'
-                        : searchSortBy === 'newest'
-                          ? 'Newest'
-                          : 'Oldest'
+                      SEARCH_SORT_OPTIONS.find((o) => o.value === searchSortBy)?.label ?? ''
                     }`}
                     selected
-                    onRemove={() => setSearchSortBy('popularity')}
+                    onRemove={() => setSearchSortBy('relevance')}
                     onPress={() => setIsFilterSheetVisible(true)}
                   />
                 ) : null}
@@ -1429,12 +1459,7 @@ export default function DiscoverScreen() {
           Sort by
         </Text>
         <View style={styles.filterGroup}>
-          {[
-            { label: 'Popularity', value: 'popularity' },
-            { label: 'Rating', value: 'rating' },
-            { label: 'Newest', value: 'newest' },
-            { label: 'Oldest', value: 'oldest' },
-          ].map((option) => (
+          {SEARCH_SORT_OPTIONS.map((option) => (
             <Chip
               key={option.value}
               label={option.label}

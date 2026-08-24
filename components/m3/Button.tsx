@@ -32,6 +32,16 @@ export interface ButtonProps {
   trailingIcon?: boolean;
   disabled?: boolean;
   loading?: boolean;
+  /**
+   * Marks the button as a toggle and drives its on/off styling.
+   *
+   * A toggled-on `tonal` button switches from the secondary container to the
+   * primary one, which is the M3 selected treatment and — unlike `filled` —
+   * stays a dark, saturated pill in dark mode. `filled` resolves to
+   * `primary`, and in dark mode `primary` is a tone-80 pastel: an "on" state
+   * drawn that way reads as a plain white pill.
+   */
+  selected?: boolean;
   /** Stretches to fill the parent's cross axis. */
   fullWidth?: boolean;
   /**
@@ -68,6 +78,7 @@ export default function Button({
   trailingIcon = false,
   disabled = false,
   loading = false,
+  selected,
   fullWidth = false,
   compact = false,
   style,
@@ -111,8 +122,18 @@ export default function Button({
 
     const accent = tone === 'error' ? colors.error : colors.primary;
     const onAccent = tone === 'error' ? colors.onError : colors.onPrimary;
-    const container = tone === 'error' ? colors.errorContainer : colors.secondaryContainer;
-    const onContainer = tone === 'error' ? colors.onErrorContainer : colors.onSecondaryContainer;
+    const container =
+      tone === 'error'
+        ? colors.errorContainer
+        : selected
+          ? colors.primaryContainer
+          : colors.secondaryContainer;
+    const onContainer =
+      tone === 'error'
+        ? colors.onErrorContainer
+        : selected
+          ? colors.onPrimaryContainer
+          : colors.onSecondaryContainer;
 
     switch (variant) {
       case 'filled':
@@ -153,7 +174,7 @@ export default function Button({
           stateLayerColor: accent,
         };
     }
-  }, [variant, tone, isDisabled, colors]);
+  }, [variant, tone, selected, isDisabled, colors]);
 
   const iconNode = icon ? (
     <Ionicons name={icon} size={dims.icon} color={content} />
@@ -165,10 +186,10 @@ export default function Button({
       disabled={isDisabled}
       stateLayerColor={stateLayerColor}
       borderRadius={shape.full}
-      accessibilityRole="button"
+      accessibilityRole={selected === undefined ? 'button' : 'togglebutton'}
       accessibilityLabel={accessibilityLabel ?? label}
       accessibilityHint={accessibilityHint}
-      accessibilityState={{ disabled: isDisabled, busy: loading }}
+      accessibilityState={{ disabled: isDisabled, busy: loading, selected }}
       testID={testID}
       // The 32dp `small` button is on-spec visually but under the 48dp target
       // minimum, so it gets slop to make up the shortfall.

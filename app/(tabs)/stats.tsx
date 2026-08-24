@@ -19,6 +19,7 @@ import HeatmapGrid from '../../components/HeatmapGrid';
 import StatCard from '../../components/StatCard';
 import EmptyState from '../../components/EmptyState';
 import { useDatabase } from '../../hooks/useDatabase';
+import { enrichLibrary } from '../../services/enrichment';
 import { UserStats } from '../../types';
 
 const MONTH_INITIALS = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
@@ -69,6 +70,8 @@ export default function StatsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showAllGenres, setShowAllGenres] = useState(false);
+  /** True while missing runtimes and credits are being fetched from TMDB. */
+  const [enriching, setEnriching] = useState(false);
 
   const currentYear = new Date().getFullYear();
   const atLatestYear = selectedYear >= currentYear;
@@ -92,17 +95,42 @@ export default function StatsScreen() {
     }
   }, [getStats, selectedYear]);
 
+  /**
+   * Fill in what the library is missing, then re-read the numbers.
+   *
+   * Hours watched and the top people lists are only as good as what was
+   * recorded when each title was saved — and for anything logged from a
+   * poster long-press, from Upcoming, or from an import, that was very little.
+   * A capped batch runs whenever this screen is opened, so the figures
+   * converge on the truth over a few visits instead of staying wrong forever.
+   */
+  const enrichAndRefresh = useCallback(async () => {
+    try {
+      setEnriching(true);
+      const { enriched } = await enrichLibrary();
+      if (enriched > 0) await fetchStats();
+    } catch (err) {
+      console.warn('Stats enrichment failed:', err);
+    } finally {
+      setEnriching(false);
+    }
+  }, [fetchStats]);
+
   useFocusEffect(
     useCallback(() => {
-      if (isReady) fetchStats();
-    }, [isReady, fetchStats])
+      if (!isReady) return;
+      // The stats render from what is already stored first; enrichment only
+      // ever improves them, so it must never gate the first paint.
+      fetchStats().then(enrichAndRefresh);
+    }, [isReady, fetchStats, enrichAndRefresh])
   );
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     await fetchStats();
+    await enrichAndRefresh();
     setRefreshing(false);
-  }, [fetchStats]);
+  }, [fetchStats, enrichAndRefresh]);
 
   const fullMonthlyBreakdown = useMemo(
     () =>
@@ -123,6 +151,11 @@ export default function StatsScreen() {
   }
 
   const hasStats = !!stats && stats.totalWatched > 0;
+  /** Watched titles whose length is still unknown, so excluded from the total. */
+  const untimedTitles = Math.max(
+    0,
+    (stats?.totalWatched ?? 0) - (stats?.titlesWithRuntime ?? 0)
+  );
   const genreTotal = stats?.favoriteGenres?.reduce((acc, g) => acc + g.count, 0) || 1;
   const maxRatingCount = Math.max(...(stats?.ratingDistribution || []).map((r) => r.count), 1);
   const maxMonthCount = Math.max(...fullMonthlyBreakdown.map((m) => m.count), 1);
@@ -221,6 +254,16 @@ export default function StatsScreen() {
             icon="time-outline"
             color={chartColor(4, isDark)}
             width={statCardWidth}
+            // Titles whose length was never recorded contribute nothing, so a
+            // partial total is labelled as one rather than passed off as
+            // complete. Enrichment shrinks this gap on each visit.
+            note={
+              enriching
+                ? 'Updating…'
+                : untimedTitles > 0
+                  ? `${untimedTitles} not counted yet`
+                  : undefined
+            }
           />
           <StatCard
             label="Average rating"
@@ -418,9 +461,10 @@ export default function StatsScreen() {
           </Section>
         ) : null}
 
-        {/* People */}
+        {/* People. Series carry no series-level director credit, so their
+            creators stand in — hence the heading is not "directors" alone. */}
         {stats?.topDirectors && stats.topDirectors.length > 0 ? (
-          <Section icon="videocam-outline" title="Top directors" gutter={gutter}>
+          <Section icon="videocam-outline" title="Top directors & creators" gutter={gutter}>
             <Card variant="filled" radius={shape.large}>
               {stats.topDirectors.map((director, index) => (
                 <View
@@ -431,7 +475,7 @@ export default function StatsScreen() {
                   ]}
                   accessible
                   accessibilityLabel={`Number ${index + 1}, ${director.name}, ${director.count} ${
-                    director.count === 1 ? 'film' : 'films'
+                    director.count === 1 ? 'title' : 'titles'
                   }`}
                 >
                   <Text variant="titleSmall" color={colors.primary} style={styles.rank}>
@@ -446,7 +490,7 @@ export default function StatsScreen() {
                     {director.name}
                   </Text>
                   <Text variant="labelMedium" color={colors.onSurfaceVariant}>
-                    {director.count} {director.count === 1 ? 'film' : 'films'}
+                    {director.count} {director.count === 1 ? 'title' : 'titles'}
                   </Text>
                 </View>
               ))}

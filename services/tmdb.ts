@@ -25,6 +25,7 @@ import type {
   DiscoverFilters,
   Genre,
   ImageSize,
+  SearchMatchSource,
 } from '../types';
 
 // ─── Constants ──────────────────────────────────────────────
@@ -46,26 +47,52 @@ const TMDB_HOSTS = [
 let activeBaseUrl = 'https://api.themoviedb.org/3';
 
 /**
+ * Settings memo.
+ *
+ * The API key, the proxy override and the adult-content flag are read on every
+ * single request, and each one is a storage round trip — three of them in
+ * front of a search that the user is watching a spinner for. They change only
+ * from the Settings screen, so they are held in memory and the whole memo is
+ * dropped when anything writes to them.
+ */
+const settingsMemo: {
+  apiKey?: string | null;
+  apiProxy?: string | null;
+  includeAdult?: boolean;
+} = {};
+
+/** Called after any write that the memo above would otherwise go stale on. */
+export function invalidateTmdbSettingsCache(): void {
+  delete settingsMemo.apiKey;
+  delete settingsMemo.apiProxy;
+  delete settingsMemo.includeAdult;
+}
+
+/**
  * Whether the user has opted into adult results.
  *
  * The Settings toggle wrote this preference but nothing ever read it, so the
  * switch had no effect on any request. Both search and discover now honour it.
  */
 async function getIncludeAdult(): Promise<boolean> {
+  if (settingsMemo.includeAdult !== undefined) return settingsMemo.includeAdult;
   try {
-    return (await getPreference('PREF_ADULT_CONTENT')) === 'true';
+    settingsMemo.includeAdult = (await getPreference('PREF_ADULT_CONTENT')) === 'true';
   } catch {
-    return false;
+    settingsMemo.includeAdult = false;
   }
+  return settingsMemo.includeAdult;
 }
 
 async function getApiProxy(): Promise<string | null> {
+  if (settingsMemo.apiProxy !== undefined) return settingsMemo.apiProxy;
   try {
     const proxy = await AsyncStorage.getItem(API_PROXY_STORAGE);
-    return proxy?.trim() || null;
+    settingsMemo.apiProxy = proxy?.trim() || null;
   } catch {
-    return null;
+    settingsMemo.apiProxy = null;
   }
+  return settingsMemo.apiProxy;
 }
 
 /** Cache TTLs in milliseconds */
@@ -73,7 +100,17 @@ const CACHE_TTL = {
   list: 30 * 60 * 1000,       // 30 minutes for list endpoints
   details: 24 * 60 * 60 * 1000, // 24 hours for detail endpoints
   genres: 7 * 24 * 60 * 60 * 1000, // 7 days for genre lists
+  // Long enough to make retyping, back-navigation and paging feel instant;
+  // short enough that a newly added title shows up the same session.
+  search: 10 * 60 * 1000, // 10 minutes for search results
 };
+
+/**
+ * How many titles a single person's filmography may contribute to a search.
+ * A prolific actor has hundreds of credits; past this the expansion stops
+ * being a helpful shortcut and starts being the whole result list.
+ */
+const MAX_PERSON_CREDITS = 12;
 
 // ─── Image URL Helper ───────────────────────────────────────
 
@@ -251,15 +288,14 @@ const DEFAULT_API_KEY = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJmYjQ2YzBlNDk0MmM5MGIyZG
  * Returns the default token if no key has been configured yet.
  */
 async function getApiKey(): Promise<string | null> {
+  if (settingsMemo.apiKey !== undefined) return settingsMemo.apiKey;
   try {
     const key = await AsyncStorage.getItem(API_KEY_STORAGE);
-    if (key?.trim()) {
-      return key.trim();
-    }
-    return DEFAULT_API_KEY;
+    settingsMemo.apiKey = key?.trim() || DEFAULT_API_KEY;
   } catch {
-    return DEFAULT_API_KEY;
+    settingsMemo.apiKey = DEFAULT_API_KEY;
   }
+  return settingsMemo.apiKey;
 }
 
 function isBearerToken(key: string): boolean {
@@ -282,6 +318,43 @@ async function tmdbFetch<T>(
     const cached = await getCached<T>(cacheKey);
     if (cached) return cached;
   }
+
+  // ── Coalesce identical concurrent requests ──
+  // The home screen alone asks for the same trending pages from several rails,
+  // and the recommendation engine re-requests a popular title's credits once
+  // per seed that pointed at it. Without this each duplicate is a separate
+  // round trip that lands a moment before the first one populates the cache.
+  if (cacheKey) {
+    const inFlight = inFlightRequests.get(cacheKey);
+    if (inFlight) return inFlight as Promise<T | null>;
+  }
+
+  const request = tmdbFetchUncoalesced<T>(path, params, cacheKey, cacheTtl, rateLimitRetries);
+
+  if (cacheKey) {
+    inFlightRequests.set(cacheKey, request as Promise<unknown>);
+    request.finally(() => {
+      // Only clear our own entry — a retry may already have replaced it.
+      if (inFlightRequests.get(cacheKey) === (request as Promise<unknown>)) {
+        inFlightRequests.delete(cacheKey);
+      }
+    });
+  }
+
+  return request;
+}
+
+/** In-flight requests keyed by cache key; see `tmdbFetch`. */
+const inFlightRequests = new Map<string, Promise<unknown>>();
+
+/** The actual network path. Callers should go through `tmdbFetch`. */
+async function tmdbFetchUncoalesced<T>(
+  path: string,
+  params: Record<string, string | number | undefined> = {},
+  cacheKey?: string,
+  cacheTtl: number = CACHE_TTL.list,
+  rateLimitRetries = 0,
+): Promise<T | null> {
 
   const apiKey = await getApiKey();
   if (!apiKey) {
@@ -358,7 +431,10 @@ async function tmdbFetch<T>(
           const delay = 1000 * Math.pow(2, rateLimitRetries);
           console.warn(`[TMDB] 429 Rate limit exceeded. Backing off ${delay}ms…`);
           await new Promise((r) => setTimeout(r, delay));
-          return tmdbFetch<T>(path, params, cacheKey, cacheTtl, rateLimitRetries + 1);
+          // Deliberately *not* back through `tmdbFetch`: this call is itself
+          // the in-flight entry for this cache key, so re-entering the
+          // coalescer would hand us our own unresolved promise to await.
+          return tmdbFetchUncoalesced<T>(path, params, cacheKey, cacheTtl, rateLimitRetries + 1);
         }
         if (response.status === 401) {
           console.warn('[TMDB] 401 Unauthorized — check your API Bearer token.');
@@ -399,6 +475,131 @@ async function tmdbFetch<T>(
 
   console.error('[TMDB] All hosts failed to connect. Please verify your network, VPN, or DNS proxy settings.');
   return null;
+}
+
+// ─── Search relevance ───────────────────────────────────────
+
+/**
+ * Fold a title or query down to a comparable form: lowercase, accents
+ * stripped, punctuation dropped, whitespace collapsed. "WALL·E", "Wall-E" and
+ * "wall e" all land on `wall e`.
+ */
+function normaliseForMatch(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/** Ranked bands, spaced far enough apart that popularity can never cross one. */
+const MATCH_BAND = {
+  exact: 1000,
+  prefix: 700,
+  wordPrefix: 520,
+  substring: 380,
+  allTokens: 260,
+  someTokens: 0,
+} as const;
+
+/** How far each expansion is held below a direct title match. */
+const SOURCE_PENALTY: Record<SearchMatchSource, number> = {
+  title: 0,
+  // Both expansions are "related to what you typed" rather than "what you
+  // typed", so they sit below every direct match no matter how popular they
+  // are — a person's blockbuster must not outrank the film you named.
+  genre: MATCH_BAND.exact,
+  person: MATCH_BAND.exact,
+};
+
+/**
+ * Score how well a title answers a query.
+ *
+ * TMDB's own ordering is popularity-weighted, which is why searching for a
+ * specific, quiet film hands back a pile of famous ones first. This re-ranks
+ * on what the user actually typed: the match band dominates, and popularity
+ * only breaks ties *within* a band. A perfect title match therefore always
+ * outranks a partial one, however obscure it is.
+ */
+export function scoreSearchRelevance(
+  item: TMDBMediaItem,
+  query: string,
+  options: {
+    /** The untranslated title, when the API supplied one. */
+    originalTitle?: string | null;
+    source?: SearchMatchSource;
+  } = {},
+): number {
+  const q = normaliseForMatch(query);
+  if (!q) return 0;
+
+  const source = options.source ?? 'title';
+  const candidates = [item.title, options.originalTitle]
+    .filter((t): t is string => !!t)
+    .map(normaliseForMatch);
+
+  const queryTokens = q.split(' ').filter(Boolean);
+
+  let band: number = MATCH_BAND.someTokens;
+  for (const name of candidates) {
+    if (!name) continue;
+    if (name === q) {
+      band = Math.max(band, MATCH_BAND.exact);
+      continue;
+    }
+    if (name.startsWith(`${q} `)) {
+      band = Math.max(band, MATCH_BAND.prefix);
+      continue;
+    }
+    if (name.includes(` ${q} `) || name.endsWith(` ${q}`)) {
+      band = Math.max(band, MATCH_BAND.wordPrefix);
+      continue;
+    }
+    if (name.includes(q)) {
+      band = Math.max(band, MATCH_BAND.substring);
+      continue;
+    }
+    const nameTokens = name.split(' ').filter(Boolean);
+    const hits = queryTokens.filter((t) =>
+      nameTokens.some((n) => n.startsWith(t))
+    ).length;
+    if (hits === queryTokens.length && hits > 0) {
+      band = Math.max(band, MATCH_BAND.allTokens);
+    } else if (hits > 0) {
+      // Partial token overlap, scaled by how much of the query was covered.
+      band = Math.max(band, Math.round((hits / queryTokens.length) * 200));
+    }
+  }
+
+  // Shorter titles are the better answer for the same band: typing "dune"
+  // should reach "Dune" before "Dune: Part Two — Behind the Scenes".
+  const shortestName = candidates.reduce(
+    (best, name) => (name && name.length < best ? name.length : best),
+    Number.MAX_SAFE_INTEGER,
+  );
+  const lengthBonus =
+    shortestName === Number.MAX_SAFE_INTEGER
+      ? 0
+      : Math.max(0, 30 - Math.max(0, shortestName - q.length) * 0.6);
+
+  // Tie-breakers, deliberately capped well under one band's width.
+  const popularity = Math.min(60, Math.log10((item.popularity || 0) + 1) * 22);
+  const acclaim = (item.voteAverage || 0) * 2;
+  // Vote count separates a real release from a stub sharing its name.
+  const corroboration = Math.min(30, Math.log10((item.voteCount || 0) + 1) * 9);
+  // A title with no poster is almost always a fragment record.
+  const completeness = item.posterPath ? 12 : 0;
+
+  return (
+    band -
+    SOURCE_PENALTY[source] +
+    lengthBonus +
+    popularity +
+    acclaim +
+    corroboration +
+    completeness
+  );
 }
 
 // ─── Paginated helper ───────────────────────────────────────
@@ -517,6 +718,7 @@ export const tmdbService = {
    */
   async setApiKey(key: string): Promise<void> {
     await AsyncStorage.setItem(API_KEY_STORAGE, key.trim());
+    invalidateTmdbSettingsCache();
   },
 
   /**
@@ -537,6 +739,7 @@ export const tmdbService = {
    */
   async removeApiKey(): Promise<void> {
     await AsyncStorage.removeItem(API_KEY_STORAGE);
+    invalidateTmdbSettingsCache();
   },
 
   /**
@@ -553,6 +756,7 @@ export const tmdbService = {
     } else {
       await AsyncStorage.removeItem(API_PROXY_STORAGE);
     }
+    invalidateTmdbSettingsCache();
   },
 
   /**
@@ -567,6 +771,7 @@ export const tmdbService = {
    */
   async removeProxy(): Promise<void> {
     await AsyncStorage.removeItem(API_PROXY_STORAGE);
+    invalidateTmdbSettingsCache();
   },
 
   /**
@@ -727,9 +932,15 @@ export const tmdbService = {
       profile_path: c.profile_path,
     }));
 
+    const createdBy = (raw.created_by ?? []).map((c: any) => ({
+      id: c.id,
+      name: c.name,
+      profile_path: c.profile_path ?? null,
+    }));
+
     const director =
       crew.find((c: any) => c.job === 'Director')?.name ??
-      (raw.created_by?.[0]?.name ?? null);
+      (createdBy[0]?.name ?? null);
 
     // Watch providers — pull user's preferred country, fallback to US/IN/first available
     const providerData = raw['watch/providers']?.results;
@@ -764,7 +975,23 @@ export const tmdbService = {
       originalLanguage: raw.original_language ?? '',
       adult: raw.adult ?? false,
       genres: raw.genres ?? [],
-      runtime: mediaType === 'movie' ? (raw.runtime ?? null) : (raw.episode_run_time?.[0] ?? null),
+      // For a series this is one episode's length, not the whole run — see
+      // `deriveTotalRuntime` in services/database.ts for the total.
+      //
+      // TMDB increasingly returns an empty `episode_run_time` for streaming
+      // series (Game of Thrones among them), which used to leave the runtime
+      // null and drop the whole show out of watch-time statistics. The most
+      // recent episode's own runtime is a far better estimate than any
+      // constant, so it stands in when the series-level array is empty.
+      runtime:
+        mediaType === 'movie'
+          ? (raw.runtime ?? null)
+          : (raw.episode_run_time?.[0] ??
+             raw.last_episode_to_air?.runtime ??
+             raw.next_episode_to_air?.runtime ??
+             null),
+      episodeRunTimeMinutes:
+        mediaType === 'movie' ? null : (raw.episode_run_time?.[0] ?? null),
       numberOfSeasons: raw.number_of_seasons ?? null,
       numberOfEpisodes: raw.number_of_episodes ?? null,
       status: raw.status ?? '',
@@ -781,6 +1008,7 @@ export const tmdbService = {
       cast,
       crew,
       director,
+      createdBy,
       recommendations,
       similar,
       keywords: keywordList,
@@ -813,6 +1041,11 @@ export const tmdbService = {
 
   /**
    * Search across movies, TV, or both (multi).
+   *
+   * Results come back ranked by how well they answer the query, not by how
+   * famous they are — see `scoreSearchRelevance`. The genre-name and
+   * filmography expansions are layered underneath the direct matches so they
+   * can enrich a search without ever displacing the title you named.
    */
   async search(
     query: string,
@@ -825,42 +1058,14 @@ export const tmdbService = {
     }
 
     const allowAdult = includeAdult ?? (await getIncludeAdult());
+    const trimmed = query.trim();
+    const trimmedQuery = trimmed.toLowerCase();
 
-    const trimmedQuery = query.trim().toLowerCase();
-    // Genre and person expansions are one-off enrichments of the *first* page.
-    // Re-running them for every page (as an earlier version did) meant page 2
-    // returned the same extra titles as page 1, so scrolling produced
-    // duplicates and pagination effectively stalled.
+    // Expansions are one-off enrichments of the *first* page. Re-running them
+    // for every page (as an earlier version did) meant page 2 returned the
+    // same extra titles as page 1, so scrolling produced duplicates and
+    // pagination effectively stalled.
     const isFirstPage = page <= 1;
-
-    // ── Genre-name query expansion (first page only) ──
-    const allGenres = { ...MOVIE_GENRES, ...TV_GENRES };
-    const matchingGenreEntry = Object.entries(allGenres).find(
-      ([, name]) => name.toLowerCase() === trimmedQuery
-    );
-
-    let genreResults: TMDBMediaItem[] = [];
-    if (matchingGenreEntry && isFirstPage) {
-      const genreId = matchingGenreEntry[0];
-      try {
-        if (mediaType === 'movie' || mediaType === 'tv') {
-          const res = await this.discover(mediaType, { genres: genreId, sortBy: 'popularity.desc' }, 1);
-          genreResults = res.results;
-        } else {
-          const [movieRes, tvRes] = await Promise.all([
-            this.discover('movie', { genres: genreId, sortBy: 'popularity.desc' }, 1),
-            this.discover('tv', { genres: genreId, sortBy: 'popularity.desc' }, 1),
-          ]);
-          const maxLen = Math.max(movieRes.results.length, tvRes.results.length);
-          for (let i = 0; i < maxLen; i++) {
-            if (movieRes.results[i]) genreResults.push(movieRes.results[i]);
-            if (tvRes.results[i]) genreResults.push(tvRes.results[i]);
-          }
-        }
-      } catch (err) {
-        console.warn('[TMDB] Genre search discover failed:', err);
-      }
-    }
 
     let endpoint: string;
     let normalizer: (item: any) => TMDBMediaItem | null;
@@ -876,63 +1081,138 @@ export const tmdbService = {
       normalizer = normalizeMediaResult;
     }
 
-    // No caching for search — results change frequently
-    const raw = await tmdbFetch<RawPage>(endpoint, {
-      query: query.trim(),
-      page,
-      include_adult: allowAdult ? 'true' : 'false',
-    });
+    // ── Genre-name query expansion ──
+    // Kicked off in parallel with the search itself. Awaiting it first (the
+    // previous behaviour) added a whole round trip to the front of *every*
+    // query, including the overwhelming majority that name no genre at all.
+    const allGenres = { ...MOVIE_GENRES, ...TV_GENRES };
+    const matchingGenreEntry = Object.entries(allGenres).find(
+      ([, name]) => name.toLowerCase() === trimmedQuery
+    );
 
-    const results: TMDBMediaItem[] = [...genreResults];
+    const genrePromise: Promise<TMDBMediaItem[]> =
+      matchingGenreEntry && isFirstPage
+        ? (async () => {
+            const genreId = matchingGenreEntry[0];
+            try {
+              if (mediaType === 'movie' || mediaType === 'tv') {
+                const res = await this.discover(
+                  mediaType,
+                  { genres: genreId, sortBy: 'popularity.desc' },
+                  1
+                );
+                return res.results;
+              }
+              const [movieRes, tvRes] = await Promise.all([
+                this.discover('movie', { genres: genreId, sortBy: 'popularity.desc' }, 1),
+                this.discover('tv', { genres: genreId, sortBy: 'popularity.desc' }, 1),
+              ]);
+              const interleaved: TMDBMediaItem[] = [];
+              const maxLen = Math.max(movieRes.results.length, tvRes.results.length);
+              for (let k = 0; k < maxLen; k++) {
+                if (movieRes.results[k]) interleaved.push(movieRes.results[k]);
+                if (tvRes.results[k]) interleaved.push(tvRes.results[k]);
+              }
+              return interleaved;
+            } catch (err) {
+              console.warn('[TMDB] Genre search discover failed:', err);
+              return [];
+            }
+          })()
+        : Promise.resolve([]);
+
+    // Search responses are cached briefly. Results do drift, but not within
+    // the seconds it takes to backspace a character and retype it, or to open
+    // a title and come straight back — and those are the round trips the user
+    // actually feels.
+    const cacheKey = `search:${mediaType ?? 'multi'}:${allowAdult ? 'a' : 'n'}:${trimmedQuery}:${page}`;
+    const raw = await tmdbFetch<RawPage>(
+      endpoint,
+      {
+        query: trimmed,
+        page,
+        include_adult: allowAdult ? 'true' : 'false',
+      },
+      cacheKey,
+      CACHE_TTL.search,
+    );
+
+    const scoredResults: TMDBMediaItem[] = [];
 
     if (raw?.results) {
-      // Normalize the direct title matches first so they keep their ranking.
       for (const item of raw.results) {
         if (item.media_type === 'person') continue;
         const normalized = normalizer(item);
-        if (normalized) results.push(normalized);
+        if (!normalized) continue;
+        scoredResults.push({
+          ...normalized,
+          matchSource: 'title',
+          relevance: scoreSearchRelevance(normalized, trimmed, {
+            originalTitle: item.original_title ?? item.original_name ?? null,
+            source: 'title',
+          }),
+        });
       }
+    }
 
-      // ── Person filmography expansion (first page only) ──
-      // Searching "Nolan" should surface his films, not just his person entry.
-      if (isFirstPage) {
-        const personResults = raw.results
-          .filter((item: any) => item.media_type === 'person')
-          .slice(0, 2);
+    // ── Person filmography expansion ──
+    // Searching "Nolan" should surface his films, not just his person entry.
+    // Only the single best-matching person is expanded: pulling two people's
+    // full credit lists was the slowest part of every name search and buried
+    // the direct matches under a hundred loosely-related titles.
+    if (isFirstPage && raw?.results) {
+      const person = raw.results
+        .filter((item: any) => item.media_type === 'person')
+        .sort((a: any, b: any) => (b.popularity ?? 0) - (a.popularity ?? 0))[0];
 
-        const personCreditsLists = await Promise.all(
-          personResults.map(async (person: any) => {
-            try {
-              const details = await this.getPersonDetails(person.id);
-              return details?.combinedCredits ?? [];
-            } catch (err) {
-              console.warn(`[TMDB] Failed to fetch credits for person ${person.id}:`, err);
-              return [];
-            }
-          })
-        );
+      if (person) {
+        try {
+          const details = await this.getPersonDetails(person.id);
+          // Talk shows, news and reality entries dominate a person's credit
+          // list because of one-off guest appearances. Searching "Nolan"
+          // should lead with his films, not every late-night couch visit.
+          const CAMEO_GENRE_IDS = new Set([10767, 10763, 10764]);
+          const credits = (details?.combinedCredits ?? [])
+            .filter((credit) => !mediaType || credit.mediaType === mediaType)
+            .filter((credit) => !(credit.genreIds ?? []).some((g) => CAMEO_GENRE_IDS.has(g)))
+            .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
+            .slice(0, MAX_PERSON_CREDITS);
 
-        // Talk shows, news and reality entries dominate a person's credit list
-        // because of one-off guest appearances. Searching "Nolan" should lead
-        // with his films, not every late-night couch visit.
-        const CAMEO_GENRE_IDS = new Set([10767, 10763, 10764]);
-
-        for (const credit of personCreditsLists.flat()) {
-          if (mediaType && credit.mediaType !== mediaType) continue;
-          if ((credit.genreIds ?? []).some((g) => CAMEO_GENRE_IDS.has(g))) continue;
-          results.push(credit);
+          for (const credit of credits) {
+            scoredResults.push({
+              ...credit,
+              matchSource: 'person',
+              relevance: scoreSearchRelevance(credit, trimmed, { source: 'person' }),
+            });
+          }
+        } catch (err) {
+          console.warn(`[TMDB] Failed to fetch credits for person ${person.id}:`, err);
         }
       }
     }
 
-    // Deduplicate by media type + id
-    const seen = new Set<string>();
-    const uniqueResults = results.filter((r) => {
-      const key = `${r.mediaType}:${r.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    for (const item of await genrePromise) {
+      scoredResults.push({
+        ...item,
+        matchSource: 'genre',
+        relevance: scoreSearchRelevance(item, trimmed, { source: 'genre' }),
+      });
+    }
+
+    // Deduplicate by media type + id, keeping the highest-scoring copy — a
+    // title can arrive both as a direct match and via a filmography.
+    const bestByKey = new Map<string, TMDBMediaItem>();
+    for (const item of scoredResults) {
+      const key = `${item.mediaType}:${item.id}`;
+      const existing = bestByKey.get(key);
+      if (!existing || (item.relevance ?? 0) > (existing.relevance ?? 0)) {
+        bestByKey.set(key, item);
+      }
+    }
+
+    const uniqueResults = Array.from(bestByKey.values()).sort(
+      (a, b) => (b.relevance ?? 0) - (a.relevance ?? 0)
+    );
 
     return {
       page: raw?.page ?? page,
@@ -968,6 +1248,7 @@ export const tmdbService = {
       with_original_language: filters.withOriginalLanguage ?? filters.language,
       primary_release_year: filters.year,
       'vote_average.gte': filters.voteAverageGte,
+      'vote_count.gte': filters.voteCountGte,
       with_cast: filters.withCast,
       with_crew: filters.withCrew,
       'primary_release_date.gte': filters.releaseDateGte,
@@ -1107,18 +1388,24 @@ export const tmdbService = {
     future.setMonth(future.getMonth() + 6);
     const futureDate = future.toISOString().slice(0, 10);
 
-    const allResults: TMDBMediaItem[] = [];
     let maxPages = 0;
     let maxResults = 0;
 
     // Fetch each language in parallel
     const fetches = languages.map(async (lang) => {
       try {
+        // Ordering by date walked the release calendar strictly
+        // chronologically, and TMDB's calendar is mostly festival shorts,
+        // one-off uploads and untitled placeholders — so the feed filled up
+        // with titles nobody is waiting for while the month's actual releases
+        // sat pages deep. Ordering by popularity inside the same date window
+        // asks the opposite question ("what is anticipated?") and the results
+        // are re-sorted by date for display further down.
         const moviePromise = this.discover('movie', {
           withOriginalLanguage: lang,
           releaseDateGte: today,
           releaseDateLte: futureDate,
-          sortBy: 'primary_release_date.asc',
+          sortBy: 'popularity.desc',
         }, page, forceRefresh);
 
         const tvPromise = showSeries
@@ -1197,19 +1484,34 @@ export const tmdbService = {
     const results = await Promise.all(fetches);
 
     for (const result of results) {
-      allResults.push(...result.results);
       maxPages = Math.max(maxPages, result.totalPages);
       maxResults += result.totalResults;
     }
 
-    // Deduplicate by ID and Media Type
+    // ── Language interleaving ──
+    // Every language is asked for the same number of titles, but English has
+    // an order of magnitude more releases than any regional language, so
+    // concatenating the lists and sorting by date buried the regional picks
+    // behind a wall of English. Taking one title from each language in turn
+    // gives every selected language a proportional share of the page, which
+    // is what the language chips are promising.
+    const perLanguage = results.map((r) => [...r.results]);
     const seen = new Set<string>();
-    const unique = allResults.filter((item) => {
-      const key = `${item.mediaType || 'movie'}-${item.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    const unique: TMDBMediaItem[] = [];
+
+    for (let round = 0; ; round++) {
+      let tookAny = false;
+      for (const list of perLanguage) {
+        const item = list[round];
+        if (!item) continue;
+        tookAny = true;
+        const key = `${item.mediaType || 'movie'}-${item.id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(item);
+      }
+      if (!tookAny) break;
+    }
 
     // Sort by release date ascending
     unique.sort((a, b) => (a.releaseDate || '').localeCompare(b.releaseDate || ''));

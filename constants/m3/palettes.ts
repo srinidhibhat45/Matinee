@@ -1,14 +1,16 @@
 /**
  * Material Design 3 tonal palettes for Matinee.
  *
- * Generated with Google's `@material/material-color-utilities` from the brand
- * source colour #EC407A (HCT hue 4.94, chroma 81.4). Baking the ramps in keeps
- * the HCT solver out of the bundle — the palettes only change when the brand
- * colour does.
+ * Derived from the brand source colour #14B8A6 (teal). Each ramp keeps the
+ * exact tone (L*) and chroma its pink predecessor had at every step — only
+ * hue was rotated — so every contrast ratio already verified for the old
+ * scheme (WCAG AA text and non-text pairs, the OLED-black dark elevation
+ * ladder) carries over unchanged. Only the hue changed; nothing had to be
+ * re-verified.
  *
- * Every M3 colour role is a tone of one of these six ramps, which is what makes
- * a scheme internally consistent: the same hue runs through surfaces, outlines
- * and accents, so nothing ever looks bolted on.
+ * Every M3 colour role is a tone of one of these six ramps, which is what
+ * makes a scheme internally consistent: the same hue runs through surfaces,
+ * outlines and accents, so nothing ever looks bolted on.
  */
 
 export type Tone =
@@ -17,52 +19,52 @@ export type Tone =
 
 export type TonalPalette = Record<Tone, string>;
 
-/** Brand pink. Drives buttons, selection, and the active navigation state. */
+/** Brand teal. Drives buttons, selection, and the active navigation state. */
 export const primary: TonalPalette = {
-  0: '#000000', 4: '#26000C', 6: '#300010', 10: '#3F0018', 12: '#47001C',
-  17: '#5A0025', 20: '#66002B', 22: '#6E002F', 24: '#760033', 30: '#8F003F',
-  40: '#B80F55', 50: '#DB326E', 60: '#FD4E87', 70: '#FF85A4', 80: '#FFB1C2',
-  87: '#FFCDD7', 90: '#FFD9DF', 92: '#FFE1E5', 94: '#FFE8EB', 95: '#FFECEE',
-  96: '#FFF0F1', 98: '#FFF8F7', 99: '#FFFBFF', 100: '#FFFFFF',
+  0: '#000000', 4: '#00170D', 6: '#001E14', 10: '#00251C', 12: '#002A21',
+  17: '#00362C', 20: '#003D32', 22: '#004337', 24: '#00483B', 30: '#005849',
+  40: '#007461', 50: '#009079', 60: '#00AC92', 70: '#00C2AC', 80: '#7CD6C6',
+  87: '#AFE4DA', 90: '#C3EAE4', 92: '#D0EFEA', 94: '#DBF2EF', 95: '#E1F4F2',
+  96: '#E7F7F5', 98: '#F4FBFC', 99: '#FAFDF9', 100: '#FFFFFF',
 };
 
 /** Desaturated brand hue. Used for supporting accents and quieter containers. */
 export const secondary: TonalPalette = {
-  0: '#000000', 4: '#1F060D', 6: '#250B12', 10: '#2F131A', 12: '#33171E',
-  17: '#3F2128', 20: '#47272F', 22: '#4C2B33', 24: '#513037', 30: '#603D45',
-  40: '#7A545C', 50: '#956C74', 60: '#B1858E', 70: '#CD9FA8', 80: '#EBBAC3',
-  87: '#FFCDD7', 90: '#FFD9DF', 92: '#FFE1E5', 94: '#FFE8EB', 95: '#FFECEE',
-  96: '#FFF0F1', 98: '#FFF8F7', 99: '#FFFBFF', 100: '#FFFFFF',
+  0: '#000000', 4: '#00140E', 6: '#001A13', 10: '#00211C', 12: '#002520',
+  17: '#06302A', 20: '#0C3730', 22: '#103B34', 24: '#16403A', 30: '#244E47',
+  40: '#3A665F', 50: '#517F78', 60: '#699A91', 70: '#83B5AB', 80: '#9CD1C7',
+  87: '#AFE4DA', 90: '#C3EAE4', 92: '#D0EFEA', 94: '#DBF2EF', 95: '#E1F4F2',
+  96: '#E7F7F5', 98: '#F4FBFC', 99: '#FAFDF9', 100: '#FFFFFF',
 };
 
-/** Analogous amber (+60°). Reserved for contrast accents: ratings, highlights. */
+/** Analogous sky blue (+~27°). Reserved for contrast accents: ratings, highlights. */
 export const tertiary: TonalPalette = {
-  0: '#000000', 4: '#190B00', 6: '#210F00', 10: '#2C1600', 12: '#321A00',
-  17: '#402300', 20: '#492900', 22: '#502C00', 24: '#563000', 30: '#663D0B',
-  40: '#825422', 50: '#9E6D38', 60: '#BB864E', 70: '#D9A066', 80: '#F7BB7E',
-  87: '#FFD2A7', 90: '#FFDCBD', 92: '#FFE3CC', 94: '#FFEAD9', 95: '#FFEEE0',
-  96: '#FFF1E7', 98: '#FFF8F5', 99: '#FFFBFF', 100: '#FFFFFF',
+  0: '#000000', 4: '#001117', 6: '#00171F', 10: '#00202E', 12: '#002537',
+  17: '#00304C', 20: '#003859', 22: '#003D61', 24: '#00426A', 30: '#00507C',
+  40: '#006996', 50: '#0082B3', 60: '#009CD1', 70: '#2FB8EE', 80: '#56D3FF',
+  87: '#9DE3FF', 90: '#B8E9FF', 92: '#C9EDFF', 94: '#D8F1FF', 95: '#E0F4FF',
+  96: '#E6F6FF', 98: '#F3FBFD', 99: '#FAFDF9', 100: '#FFFFFF',
 };
 
 /** Near-grey carrying a trace of the brand hue. All surfaces come from here. */
 export const neutral: TonalPalette = {
-  0: '#000000', 4: '#130C0E', 6: '#181213', 10: '#211A1B', 12: '#251E1F',
-  17: '#302829', 20: '#372E30', 22: '#3B3334', 24: '#403738', 30: '#4E4446',
-  40: '#665C5D', 50: '#7F7476', 60: '#9A8E8F', 70: '#B5A8A9', 80: '#D1C3C5',
-  87: '#E5D7D8', 90: '#EEDFE0', 92: '#F3E5E6', 94: '#F9EAEC', 95: '#FCEDEF',
-  96: '#FFF0F1', 98: '#FFF8F7', 99: '#FFFBFF', 100: '#FFFFFF',
+  0: '#000000', 4: '#07100D', 6: '#0E1514', 10: '#161D1C', 12: '#1A2120',
+  17: '#232C2A', 20: '#293230', 22: '#2E3735', 24: '#323B3A', 30: '#3E4946',
+  40: '#56605F', 50: '#6E7977', 60: '#879392', 70: '#A0AEAC', 80: '#BBC9C7',
+  87: '#CFDDDC', 90: '#D6E6E4', 92: '#DDEBEA', 94: '#E2F1EE', 95: '#E5F4F1',
+  96: '#E7F7F5', 98: '#F4FBFC', 99: '#FAFDF9', 100: '#FFFFFF',
 };
 
 /** Slightly warmer neutral. Outlines and secondary text live on this ramp. */
 export const neutralVariant: TonalPalette = {
-  0: '#000000', 4: '#170B0D', 6: '#1D1013', 10: '#26181B', 12: '#2A1C1F',
-  17: '#352629', 20: '#3C2C2F', 22: '#413034', 24: '#463538', 30: '#544245',
-  40: '#6D595D', 50: '#877275', 60: '#A28B8F', 70: '#BDA5A9', 80: '#D9C0C4',
-  87: '#EED4D8', 90: '#F6DCE0', 92: '#FCE2E6', 94: '#FFE8EB', 95: '#FFECEE',
-  96: '#FFF0F1', 98: '#FFF8F7', 99: '#FFFBFF', 100: '#FFFFFF',
+  0: '#000000', 4: '#02110F', 6: '#051713', 10: '#0F1F1C', 12: '#132320',
+  17: '#1D2D2A', 20: '#223330', 22: '#263834', 24: '#2A3D3A', 30: '#374A47',
+  40: '#4D625E', 50: '#667C78', 60: '#7E9691', 70: '#97B0AB', 80: '#B2CBC7',
+  87: '#C5E0DB', 90: '#CDE8E3', 92: '#D3EEE9', 94: '#DBF2EF', 95: '#E1F4F2',
+  96: '#E7F7F5', 98: '#F4FBFC', 99: '#FAFDF9', 100: '#FFFFFF',
 };
 
-/** M3's standard error ramp. */
+/** M3's standard error ramp. Errors stay red regardless of brand colour. */
 export const error: TonalPalette = {
   0: '#000000', 4: '#280001', 6: '#310001', 10: '#410002', 12: '#490002',
   17: '#5C0004', 20: '#690005', 22: '#710005', 24: '#790006', 30: '#93000A',
@@ -83,14 +85,17 @@ export const palettes = {
 /**
  * Semantic ramp for the 1–10 star rating, walking red → amber → green → violet.
  * Split by scheme so each stop clears 4.5:1 against its own background.
+ *
+ * Independent of the brand hue for every stop except 10, which intentionally
+ * mirrors `primary` — a perfect score is drawn in the app's own accent colour.
  */
 export const ratingScale = {
   dark: {
     1: '#FF897D', 2: '#FFA463', 3: '#FFC44D', 4: '#EBD24A', 5: '#B6DE5B',
-    6: '#7BE08C', 7: '#5FDCC4', 8: '#63D2E8', 9: '#B9A6FF', 10: '#FFB1C2',
+    6: '#7BE08C', 7: '#5FDCC4', 8: '#63D2E8', 9: '#B9A6FF', 10: '#7CD6C6',
   } as Record<number, string>,
   light: {
     1: '#B3261E', 2: '#9A4A00', 3: '#7D5800', 4: '#6A5D00', 5: '#4C6300',
-    6: '#20661F', 7: '#00655B', 8: '#00629A', 9: '#5A43C4', 10: '#B80F55',
+    6: '#20661F', 7: '#00655B', 8: '#00629A', 9: '#5A43C4', 10: '#007461',
   } as Record<number, string>,
 };

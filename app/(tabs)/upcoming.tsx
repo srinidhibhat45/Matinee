@@ -17,6 +17,7 @@ import {
   SearchField,
   SegmentedButtons,
   Text,
+  Touchable,
   NAVIGATION_BAR_HEIGHT,
 } from '../../components/m3';
 import { tmdbService, getImageUrl, limitConcurrency } from '../../services/tmdb';
@@ -32,6 +33,27 @@ import { LANGUAGES, DEFAULT_LANGUAGES } from '../../constants/languages';
 const LANGUAGE_CHIPS = LANGUAGES.filter((l) =>
   DEFAULT_LANGUAGES.includes(l.code)
 ).map((l) => ({ id: l.code, name: l.name }));
+
+/**
+ * Upcoming keeps its own language selection, separate from the discover feed's
+ * `PREF_LANGUAGES`.
+ *
+ * Sharing one key meant narrowing the release calendar to Kannada also
+ * narrowed every recommendation rail, and widening the feed to seven languages
+ * silently widened the calendar — so the chips on this screen kept showing a
+ * selection the user had never made here.
+ */
+const UPCOMING_LANGUAGES_PREF = 'PREF_UPCOMING_LANGUAGES';
+
+/**
+ * One language until the user says otherwise.
+ *
+ * The old default was all seven of `DEFAULT_LANGUAGES`, which fired seven
+ * parallel discover calls per page and produced a calendar too crowded to
+ * scan. Starting from English alone makes the first paint fast and makes the
+ * chip row mean something: what is ticked is what is in the list.
+ */
+const DEFAULT_UPCOMING_LANGUAGES = ['en'];
 
 type TimeBucket = 'thisWeek' | 'thisMonth' | 'later';
 
@@ -62,7 +84,12 @@ export default function UpcomingScreen() {
   /** Keeps the last card clear of the navigation bar and the floating FAB. */
   const bottomPadding =
     (isCompact ? NAVIGATION_BAR_HEIGHT + insets.bottom : insets.bottom) + 88;
-  const [selectedLanguages, setSelectedLanguages] = useState<string[]>(['en']);
+  // Starts empty: the first fetch waits for the stored preference so the
+  // screen can't fire one request wave for a placeholder selection and a
+  // second for the real one — which is what made the chips visibly change
+  // under the user a moment after the tab opened.
+  const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
+  const [languagesLoaded, setLanguagesLoaded] = useState(false);
   const [upcomingMovies, setUpcomingMovies] = useState<TMDBMediaItem[]>([]);
   const [dbStatusMap, setDbStatusMap] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -81,11 +108,20 @@ export default function UpcomingScreen() {
   const isFetchingRef = useRef(false);
   const loadedPageRef = useRef(1);
   const lastFetchedRef = useRef(0);
+  /**
+   * Invalidates in-flight background enrichment. A language change or a pull
+   * to refresh replaces the list wholesale, and details still arriving for the
+   * previous list would otherwise merge themselves into the new one.
+   */
+  const decorationTokenRef = useRef(0);
 
   const loadLanguagePreferences = useCallback(async () => {
     try {
-      const langs = await getPreference('PREF_LANGUAGES');
-      const nextLangs = langs ? langs.split(',') : DEFAULT_LANGUAGES;
+      const stored = await getPreference(UPCOMING_LANGUAGES_PREF);
+      const parsed = stored
+        ? stored.split(',').map((c) => c.trim()).filter(Boolean)
+        : [];
+      const nextLangs = parsed.length > 0 ? parsed : DEFAULT_UPCOMING_LANGUAGES;
       setSelectedLanguages((prev) => {
         if (prev.length === nextLangs.length && prev.every((l, idx) => l === nextLangs[idx])) {
           return prev;
@@ -94,11 +130,15 @@ export default function UpcomingScreen() {
       });
     } catch (err) {
       console.error('Load language preferences error:', err);
+      setSelectedLanguages((prev) => (prev.length > 0 ? prev : DEFAULT_UPCOMING_LANGUAGES));
+    } finally {
+      setLanguagesLoaded(true);
     }
   }, []);
 
   const fetchUpcoming = useCallback(async (pageNum = 1, shouldAppend = false, forceRefresh = false) => {
     if (isFetchingRef.current) return;
+    if (selectedLanguages.length === 0) return;
     if (shouldAppend && pageNum <= loadedPageRef.current) return;
 
     isFetchingRef.current = true;
@@ -141,106 +181,28 @@ export default function UpcomingScreen() {
         return true;
       });
 
-      // 4. Decorate with full details (runtime, watch providers, certification, upcoming TV events) using limitConcurrency
-      const results = await limitConcurrency(
-        filteredRawResults,
-        5,
-        async (item) => {
-          try {
-            const details = await tmdbService.getDetails(item.id, item.mediaType || 'movie', forceRefresh);
-            if (details) {
-              let updatedReleaseDate = item.releaseDate;
-              let upcomingEventTitle: string | undefined = undefined;
-              let upcomingEpisodeInfo: string | undefined = undefined;
-
-              if (item.mediaType === 'tv') {
-                const todayStr = new Date().toISOString().split('T')[0];
-                let upcomingDate: string | null = null;
-                let eventTitle: string | null = null;
-
-                // 1. Check nextEpisodeToAir
-                if (details.nextEpisodeToAir && details.nextEpisodeToAir.air_date >= todayStr) {
-                  upcomingDate = details.nextEpisodeToAir.air_date;
-                  const { season_number, episode_number } = details.nextEpisodeToAir;
-                  if (episode_number === 1) {
-                    eventTitle = `Season ${season_number} Premiere`;
-                  } else {
-                    eventTitle = null;
-                  }
-                  const s = String(season_number).padStart(2, '0');
-                  const e = String(episode_number).padStart(2, '0');
-                  upcomingEpisodeInfo = `S${s}-E${e}`;
-                }
-                // 2. Otherwise, check seasons list for future season air dates
-                if (!upcomingDate && details.seasons) {
-                  const futureSeasons = details.seasons
-                    .filter((s: any) => s.season_number > 0 && s.air_date && s.air_date >= todayStr)
-                    .sort((a: any, b: any) => a.season_number - b.season_number);
-                  if (futureSeasons.length > 0) {
-                    upcomingDate = futureSeasons[0].air_date;
-                    const sNum = futureSeasons[0].season_number;
-                    eventTitle = `Season ${sNum} Premiere`;
-                    upcomingEpisodeInfo = `S${String(sNum).padStart(2, '0')}`;
-                  }
-                }
-
-                if (upcomingDate) {
-                  updatedReleaseDate = upcomingDate;
-                  upcomingEventTitle = eventTitle || undefined;
-                } else if (item.releaseDate && item.releaseDate >= todayStr) {
-                  upcomingEventTitle = 'Series Premiere';
-                }
-              }
-
-              return {
-                ...item,
-                runtime: details.runtime,
-                certification: details.certification,
-                watchProviders: details.watchProviders,
-                releaseDate: updatedReleaseDate,
-                upcomingEventTitle,
-                upcomingEpisodeInfo,
-              };
-            }
-          } catch (err) {
-            console.error(`Failed to load details for upcoming item ${item.id}:`, err);
-          }
-          return item;
-        }
-      );
-
-      const filterByCountry = (await getPreference('PREF_FILTER_BY_COUNTRY')) === 'true';
-      let processedResults = results;
-      if (filterByCountry) {
-        processedResults = results.filter((item) => {
-          if (item.mediaType !== 'tv') return true;
-          const providers = item.watchProviders;
-          if (!providers) return false;
-          const hasFlatrate = Array.isArray(providers.flatrate) && providers.flatrate.length > 0;
-          const hasBuy = Array.isArray(providers.buy) && providers.buy.length > 0;
-          const hasRent = Array.isArray(providers.rent) && providers.rent.length > 0;
-          return hasFlatrate || hasBuy || hasRent;
-        });
-      }
+      // 4. Show the page immediately, then enrich it.
+      //
+      // Runtime, certification, watch providers and a series' next air date all
+      // live behind a per-title details call. Awaiting twenty of those before
+      // the first render meant the calendar sat on a spinner for as long as the
+      // slowest one took. The list is published from the discover payload right
+      // away and each detail merges in as it lands, so the screen is usable in
+      // one round trip and simply gains detail as it goes.
+      const sortByDate = (list: TMDBMediaItem[]) =>
+        [...list].sort(
+          (a, b) => new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime()
+        );
 
       setUpcomingMovies((prev) => {
-        const filteredResults = processedResults.filter(
-          (m) => !skipKeys.has(itemKey(m.mediaType, m.id))
-        );
         if (shouldAppend) {
           const existingKeys = new Set(prev.map((m) => itemKey(m.mediaType, m.id)));
-          const newUnique = filteredResults.filter(
+          const newUnique = filteredRawResults.filter(
             (m) => !existingKeys.has(itemKey(m.mediaType, m.id))
           );
-          const combined = [...prev, ...newUnique];
-          return combined.sort(
-            (a, b) => new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime()
-          );
-        } else {
-          return filteredResults.sort(
-            (a, b) => new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime()
-          );
+          return sortByDate([...prev, ...newUnique]);
         }
+        return sortByDate(filteredRawResults);
       });
 
       setPage(pageNum);
@@ -248,6 +210,98 @@ export default function UpcomingScreen() {
       if (pageNum === 1) {
         lastFetchedRef.current = Date.now();
       }
+
+      // ── Background enrichment ──
+      const decorationToken = ++decorationTokenRef.current;
+      const filterByCountry = (await getPreference('PREF_FILTER_BY_COUNTRY')) === 'true';
+
+      void limitConcurrency(filteredRawResults, 5, async (item) => {
+        if (decorationToken !== decorationTokenRef.current) return;
+        try {
+          const details = await tmdbService.getDetails(
+            item.id,
+            item.mediaType || 'movie',
+            forceRefresh
+          );
+          if (!details) return;
+          if (decorationToken !== decorationTokenRef.current) return;
+
+          let updatedReleaseDate = item.releaseDate;
+          let upcomingEventTitle: string | undefined;
+          let upcomingEpisodeInfo: string | undefined;
+
+          if (item.mediaType === 'tv') {
+            const todayStr = new Date().toISOString().split('T')[0];
+            let upcomingDate: string | null = null;
+            let eventTitle: string | null = null;
+
+            // 1. Check nextEpisodeToAir
+            if (details.nextEpisodeToAir && details.nextEpisodeToAir.air_date >= todayStr) {
+              upcomingDate = details.nextEpisodeToAir.air_date;
+              const { season_number, episode_number } = details.nextEpisodeToAir;
+              eventTitle = episode_number === 1 ? `Season ${season_number} Premiere` : null;
+              const sn = String(season_number).padStart(2, '0');
+              const en = String(episode_number).padStart(2, '0');
+              upcomingEpisodeInfo = `S${sn}-E${en}`;
+            }
+
+            // 2. Otherwise, check the seasons list for future season air dates
+            if (!upcomingDate && details.seasons) {
+              const futureSeasons = details.seasons
+                .filter((se: any) => se.season_number > 0 && se.air_date && se.air_date >= todayStr)
+                .sort((a: any, b: any) => a.season_number - b.season_number);
+              if (futureSeasons.length > 0) {
+                upcomingDate = futureSeasons[0].air_date;
+                const sNum = futureSeasons[0].season_number;
+                eventTitle = `Season ${sNum} Premiere`;
+                upcomingEpisodeInfo = `S${String(sNum).padStart(2, '0')}`;
+              }
+            }
+
+            if (upcomingDate) {
+              updatedReleaseDate = upcomingDate;
+              upcomingEventTitle = eventTitle || undefined;
+            } else if (item.releaseDate && item.releaseDate >= todayStr) {
+              upcomingEventTitle = 'Series Premiere';
+            }
+          }
+
+          // "Available in my country" needs the provider list, which only
+          // arrives with the details — so it is applied here, as a removal,
+          // rather than up front.
+          const providers = details.watchProviders;
+          const hasProvider =
+            !!providers &&
+            ((providers.flatrate?.length ?? 0) > 0 ||
+              (providers.buy?.length ?? 0) > 0 ||
+              (providers.rent?.length ?? 0) > 0);
+          const dropForCountry = filterByCountry && item.mediaType === 'tv' && !hasProvider;
+
+          const key = itemKey(item.mediaType, item.id);
+          setUpcomingMovies((prev) => {
+            const index = prev.findIndex((m) => itemKey(m.mediaType, m.id) === key);
+            if (index === -1) return prev;
+            if (dropForCountry) {
+              return prev.filter((_, idx) => idx !== index);
+            }
+            const next = [...prev];
+            next[index] = {
+              ...next[index],
+              runtime: details.runtime,
+              certification: details.certification,
+              watchProviders: details.watchProviders,
+              releaseDate: updatedReleaseDate,
+              upcomingEventTitle,
+              upcomingEpisodeInfo,
+            } as TMDBMediaItem;
+            // A series' real next air date can differ from its first air date,
+            // so the row may need to move.
+            return updatedReleaseDate !== item.releaseDate ? sortByDate(next) : next;
+          });
+        } catch (err) {
+          console.error(`Failed to load details for upcoming item ${item.id}:`, err);
+        }
+      });
     } catch (err) {
       console.error('Upcoming fetch error:', err);
     } finally {
@@ -355,15 +409,16 @@ export default function UpcomingScreen() {
     useCallback(() => {
       loadLanguagePreferences();
       const { dbChangeTimestamp } = require('../../services/database');
-      if (dbChangeTimestamp > lastFetchedRef.current) {
+      if (languagesLoaded && dbChangeTimestamp > lastFetchedRef.current) {
         fetchUpcoming(1, false);
       }
-    }, [loadLanguagePreferences, fetchUpcoming])
+    }, [loadLanguagePreferences, fetchUpcoming, languagesLoaded])
   );
 
   useEffect(() => {
+    if (!languagesLoaded || selectedLanguages.length === 0) return;
     fetchUpcoming(1, false);
-  }, [fetchUpcoming, selectedLanguages]);
+  }, [fetchUpcoming, languagesLoaded, selectedLanguages]);
 
   // Debounce search query
   useEffect(() => {
@@ -534,8 +589,9 @@ export default function UpcomingScreen() {
       let next = prev.includes(langCode)
         ? prev.filter((code) => code !== langCode)
         : [...prev, langCode];
-      if (next.length === 0) next = ['en']; // Keep English as fallback
-      setPreference('PREF_LANGUAGES', next.join(',')).catch(console.error);
+      // Never leave the calendar with nothing to show.
+      if (next.length === 0) next = DEFAULT_UPCOMING_LANGUAGES;
+      setPreference(UPCOMING_LANGUAGES_PREF, next.join(',')).catch(console.error);
       return next;
     });
   }, []);
@@ -704,26 +760,35 @@ export default function UpcomingScreen() {
       const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
 
       return (
-        <Card
-          variant="filled"
-          radius={shape.large}
-          onPress={() => handleItemPress(item)}
-          onLongPress={() => handleItemLongPress(item)}
-          accessibilityLabel={[
-            item.title,
-            item.upcomingEpisodeInfo,
-            typeLabel,
-            `Releases ${releaseDate}`,
-            runtimeStr,
-            genres,
-            langName,
-            isInterested ? 'Reminder set' : null,
-          ]
-            .filter(Boolean)
-            .join(', ')}
-          accessibilityHint="Double tap to open. Long press for quick actions."
-        >
+        <Card variant="filled" radius={shape.large}>
+          {/* The card used to be one big pressable with the Remind and
+              Calendar buttons inside it. Nesting a control inside a control is
+              invalid — on web it renders a <button> inside a <button>, which
+              React rejects outright — and it leaves a screen reader with no way
+              to reach the actions separately from the card. Only the poster and
+              the metadata open the title now; the action column sits beside
+              them as a sibling. */}
           <View style={styles.cardRow}>
+            <Touchable
+              onPress={() => handleItemPress(item)}
+              onLongPress={() => handleItemLongPress(item)}
+              stateLayerColor={colors.onSurface}
+              borderRadius={shape.large}
+              accessibilityRole="button"
+              accessibilityLabel={[
+                item.title,
+                item.upcomingEpisodeInfo,
+                typeLabel,
+                `Releases ${releaseDate}`,
+                runtimeStr,
+                genres,
+                langName,
+              ]
+                .filter(Boolean)
+                .join(', ')}
+              accessibilityHint="Double tap to open. Long press for quick actions."
+              style={styles.cardPressable}
+            >
             <View>
               {item.posterPath ? (
                 <Image
@@ -813,8 +878,12 @@ export default function UpcomingScreen() {
                   </View>
                 ) : null}
 
-                {item.originalLanguage && selectedLanguages.length > 1 ? (
-                  <View style={[styles.pill, { backgroundColor: colors.surfaceContainerHighest }]}>
+                {/* Shown unconditionally. It used to appear only when more
+                    than one language was selected, so with a single language
+                    the rows carried no evidence of which one they were in —
+                    which is exactly what made the filter look untrustworthy. */}
+                {item.originalLanguage ? (
+                  <View style={[styles.pill, { backgroundColor: colors.surfaceContainerHigh }]}>
                     <Text variant="labelSmall" color={colors.onSurfaceVariant}>
                       {langName}
                     </Text>
@@ -849,21 +918,24 @@ export default function UpcomingScreen() {
                 )}
               </View>
             </View>
+            </Touchable>
 
             <View style={styles.actionCol}>
               <Button
                 label={isInterested ? 'On' : 'Remind'}
                 icon={isInterested ? 'notifications' : 'notifications-outline'}
-                variant={isInterested ? 'filled' : 'outlined'}
+                // `filled` resolves to the primary role, and in dark mode that
+                // is a tone-80 pastel pink — an "on" reminder came out as a
+                // near-white pill. A selected tonal button uses the primary
+                // *container* instead, which stays dark in dark mode and light
+                // in light mode, and it announces itself as a toggle.
+                variant={isInterested ? 'tonal' : 'outlined'}
+                selected={isInterested}
                 size="small"
                 compact
                 fullWidth
                 onPress={() => handleInterested(item)}
-                accessibilityLabel={
-                  isInterested
-                    ? `Turn off release reminder for ${item.title}`
-                    : `Remind me when ${item.title} is released`
-                }
+                accessibilityLabel={`Release reminder for ${item.title}`}
               />
               <Button
                 label="Calendar"
@@ -887,7 +959,6 @@ export default function UpcomingScreen() {
       handleInterested,
       colors,
       dbStatusMap,
-      selectedLanguages.length,
       showSeries,
     ]
   );
@@ -1117,6 +1188,17 @@ const styles = StyleSheet.create({
     borderRadius: shape.full,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  /**
+   * The tappable part of the card: poster plus metadata. The action column is
+   * deliberately outside it so the two controls never nest.
+   */
+  cardPressable: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.md,
+    borderRadius: shape.large,
   },
   cardBody: {
     flex: 1,

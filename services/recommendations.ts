@@ -7,6 +7,9 @@ import {
   getGenreDistribution,
   getWatchedPeople,
   getWatchedItemsWithDetailedRatings,
+  getLibraryVersion,
+  getCache,
+  setCache,
 } from './database';
 import { tmdbService } from './tmdb';
 import {
@@ -15,6 +18,7 @@ import {
   getCanonicalGenres,
   parseStoredGenres,
 } from '../constants/genres';
+import { LANGUAGES } from '../constants/languages';
 
 /**
  * Candidate identity key. TMDB numbers movies and TV independently, so
@@ -25,11 +29,114 @@ function mediaKey(mediaType: string | undefined, id: number): string {
   return `${mediaType ?? 'movie'}:${id}`;
 }
 
+/**
+ * How long a computed feed is reused.
+ *
+ * Building one costs upwards of forty TMDB requests — seed recommendations,
+ * similar titles, per-language discovery, filmographies and trending — and
+ * every home-screen visit and media-tab switch used to pay that in full, which
+ * is the single largest reason the app felt slow. The cache key carries the
+ * library version, so anything the user logs, rates or dismisses drops the
+ * feed immediately; the TTL only governs how long an *unchanged* library keeps
+ * the same answer.
+ */
+const FEED_CACHE_TTL_MINUTES = 180;
+
+/**
+ * Rotation period for the tie-break jitter, in days.
+ *
+ * The jitter is derived from the item id so ordering is stable rather than
+ * reshuffling on every refresh — but with a fixed salt "stable" meant frozen,
+ * and an unchanged library showed exactly the same feed in exactly the same
+ * order forever. Folding the day number into the salt keeps a session
+ * consistent while letting the feed breathe from one day to the next.
+ */
+const JITTER_ROTATION_DAYS = 1;
+
+function jitterSalt(): number {
+  const day = Math.floor(Date.now() / (86400000 * JITTER_ROTATION_DAYS));
+  return day * 2654435761;
+}
+
+/**
+ * Deterministic 0–5 nudge, stable for a given item within a rotation window.
+ */
+function stableJitter(id: number): number {
+  return (((id * 2654435761) ^ jitterSalt()) >>> 0) % 1000 / 200;
+}
+
+/**
+ * How much a seed's own rating should propagate to what it recommends.
+ *
+ * Every watched title used to contribute its recommendations equally, so a
+ * film the user rated 4/10 pulled in as much as one they rated 10/10 — the
+ * engine was learning from titles the user had explicitly told it they
+ * disliked. An unrated title sits below a well-liked one but above a panned
+ * one, since "logged but not rated" is weak evidence rather than bad evidence.
+ */
+/**
+ * Minimum vote count for a cold-start discovery result. Low enough to admit
+ * regional cinema, high enough to exclude titles nobody has rated.
+ */
+const COLD_START_MIN_VOTES = 200;
+
+/**
+ * Why a cold-start pick was surfaced. Distinguishes "everyone is watching
+ * this right now" from "this is well-regarded" — the ranking already reflects
+ * quality, but "Trending now" on a decade-old title read as simply wrong.
+ */
+function coldStartReason(item: TMDBMediaItem): string {
+  const releaseYear = item.releaseDate ? new Date(item.releaseDate).getFullYear() : null;
+  const currentYear = new Date().getFullYear();
+  if (releaseYear && currentYear - releaseYear <= 1 && (item.popularity || 0) > 20) {
+    return 'Trending now';
+  }
+  return (item.voteAverage || 0) >= 7.5 ? 'Highly rated' : 'Popular pick';
+}
+
+/**
+ * Ranking for a user with no history to learn from.
+ *
+ * Quality leads, weighted by how many people voted — a 9.0 from forty viewers
+ * says much less than a 7.9 from fifty thousand. Popularity contributes, but
+ * only as a tie-breaker, because on its own it selects for volume of activity
+ * rather than for anything worth watching.
+ */
+function coldStartScore(item: TMDBMediaItem): number {
+  const confidence = Math.min(1, Math.log10((item.voteCount || 0) + 1) / 3.5);
+  const quality = (item.voteAverage || 0) * 10 * confidence;
+  const reach = Math.min(20, Math.log10((item.popularity || 0) + 1) * 6);
+  return quality + reach;
+}
+
+function seedWeight(rating: number | null | undefined): number {
+  if (rating === null || rating === undefined) return 0.45;
+  if (rating >= 9) return 1.0;
+  if (rating >= 8) return 0.85;
+  if (rating >= 7) return 0.6;
+  if (rating >= 6) return 0.35;
+  return 0.1;
+}
+
 class RecommendationService {
   /**
    * Get personalized recommendations combining multiple signals.
    */
   async getPersonalizedRecommendations(limit: number = 120, mediaType?: MediaType): Promise<RecommendedItem[]> {
+    // Serve a previously computed feed for an unchanged library. See
+    // FEED_CACHE_TTL_MINUTES for why this matters so much.
+    const libraryVersion = await getLibraryVersion();
+    const feedCacheKey = `recs:${mediaType ?? 'all'}:${limit}:${libraryVersion}`;
+    try {
+      const cached = await getCache<RecommendedItem[]>(feedCacheKey);
+      if (cached && cached.length > 0) {
+        console.log(`[Personalized Recs] Served ${cached.length} from cache.`);
+        return cached;
+      }
+    } catch {
+      // A cache miss is never a reason to fail.
+    }
+
     try {
       // Check if user has enough data
       const watchedItems = await getAllItems('watched');
@@ -70,6 +177,18 @@ class RecommendationService {
 
         for (const tag of genreTags) {
           genreProfile.set(tag, (genreProfile.get(tag) || 0) + weight);
+        }
+      }
+
+      // ── Explicit dismissals ──
+      // "Not interested" was only ever used to hide a title from the feed. It
+      // is the clearest negative signal the user can give, so it also teaches
+      // the genre profile — otherwise the engine keeps proposing more of
+      // exactly what was just rejected, only under different names.
+      const dismissedItems = await getAllItems('not_interested');
+      for (const item of dismissedItems) {
+        for (const tag of parseStoredGenres(item.genres)) {
+          genreProfile.set(tag, (genreProfile.get(tag) || 0) - 2.0);
         }
       }
 
@@ -151,7 +270,40 @@ class RecommendationService {
       const allDbItems = await getAllItems();
       const dbKeys = new Set(allDbItems.map((i) => mediaKey(i.mediaType, i.tmdbId)));
 
-      const candidateMap = new Map<string, { item: TMDBMediaItem; sources: string[] }>();
+      /**
+       * Candidate pool.
+       *
+       * `endorsement` accumulates how strongly the user's own history vouches
+       * for a title: a recommendation off a 10/10 seed is worth far more than
+       * the same title turning up behind something they sat through and rated
+       * 5. Counting sources alone — the previous approach — treated those as
+       * identical, which is how a feed built from a carefully rated library
+       * still came out looking like a popularity chart.
+       */
+      const candidateMap = new Map<
+        string,
+        { item: TMDBMediaItem; sources: string[]; endorsement: number; because?: string }
+      >();
+
+      /** Merge a candidate into the pool, accumulating its endorsement. */
+      const addCandidate = (
+        item: TMDBMediaItem,
+        sourceTag: string,
+        endorsement: number,
+        because?: string,
+      ) => {
+        const key = mediaKey(item.mediaType, item.id);
+        if (dbKeys.has(key)) return;
+
+        const existing = candidateMap.get(key);
+        if (existing) {
+          if (!existing.sources.includes(sourceTag)) existing.sources.push(sourceTag);
+          existing.endorsement += endorsement;
+          if (!existing.because && because) existing.because = because;
+          return;
+        }
+        candidateMap.set(key, { item, sources: [sourceTag], endorsement, because });
+      };
 
       // --- Smart Round-Robin Seed Selection ---
       const itemsByLanguage = new Map<string, typeof watchedItems>();
@@ -296,92 +448,73 @@ class RecommendationService {
       for (const { person, details } of lovedPeopleResults) {
         if (!details?.combinedCredits) continue;
 
+        const info = peopleScores.get(person.id);
+        const label = info?.role === 'director'
+          ? `Directed by ${info.name}`
+          : `Starring ${info?.name ?? person.name}`;
+
         let taken = 0;
         for (const credit of details.combinedCredits) {
           if (taken >= MAX_CREDITS_PER_LOVED_PERSON) break;
           if (mediaType && credit.mediaType !== mediaType) continue;
-          if (!preferredLanguages.includes(credit.originalLanguage)) continue;
-
-          const key = mediaKey(credit.mediaType, credit.id);
-          if (dbKeys.has(key)) continue;
-
+          // Deliberately not language-filtered. A title by someone the user
+          // demonstrably follows is earned, not browsed — filtering it out for
+          // being in an unlisted language threw away the strongest signal the
+          // engine has.
           taken++;
-          const sourceTag = `loved-person-${person.id}`;
-          const existing = candidateMap.get(key);
-          if (existing) {
-            if (!existing.sources.includes(sourceTag)) {
-              existing.sources.push(sourceTag);
-            }
-          } else {
-            candidateMap.set(key, {
-              item: credit,
-              sources: [sourceTag],
-            });
-          }
+          addCandidate(credit, `loved-person-${person.id}`, 3.0, label);
         }
       }
 
-      // Process seed recommendation results
+      // Process seed recommendation results.
+      //
+      // Each seed passes on a share of its own standing: how the user rated it,
+      // decayed by how far down that seed's result list the candidate sits.
+      // TMDB returns these roughly best-first, so position is real information
+      // — treating the twentieth suggestion as equal to the first was throwing
+      // it away.
       for (const { seed, recs, similar } of seedResults) {
         const rCast = recs as any;
         const sCast = similar as any;
-        
+        const weight = seedWeight(seed.userRating);
+        const because = seed.userRating
+          ? `Because you rated ${seed.title} ${seed.userRating}/10`
+          : `Because you watched ${seed.title}`;
+
+        const ingest = (list: any[], tag: string, strength: number) => {
+          list.forEach((cand: TMDBMediaItem, index: number) => {
+            if (mediaType && cand.mediaType !== mediaType) return;
+            // Not language-filtered, for the same reason as loved people:
+            // this candidate was earned by something the user actually
+            // watched. Language still steers the final mix through the
+            // interleaver below.
+            const positionDecay = 1 / (1 + index * 0.12);
+            addCandidate(cand, tag, weight * strength * positionDecay, because);
+          });
+        };
+
         if (rCast.status === 'fulfilled' && rCast.value?.results) {
-          for (const rec of rCast.value.results) {
-            if (mediaType && rec.mediaType !== mediaType) continue;
-            if (!preferredLanguages.includes(rec.originalLanguage)) continue;
-
-            const key = mediaKey(rec.mediaType, rec.id);
-            if (dbKeys.has(key)) continue;
-
-            const sourceTag = `seed-rec-${seed.tmdbId}`;
-            const existing = candidateMap.get(key);
-            if (existing) {
-              if (!existing.sources.includes(sourceTag)) existing.sources.push(sourceTag);
-            } else {
-              candidateMap.set(key, { item: rec, sources: [sourceTag] });
-            }
-          }
+          ingest(rCast.value.results, `seed-rec-${seed.tmdbId}`, 4.0);
         }
-
         if (sCast.status === 'fulfilled' && sCast.value?.results) {
-          for (const sim of sCast.value.results) {
-            if (mediaType && sim.mediaType !== mediaType) continue;
-            if (!preferredLanguages.includes(sim.originalLanguage)) continue;
-
-            const key = mediaKey(sim.mediaType, sim.id);
-            if (dbKeys.has(key)) continue;
-
-            const sourceTag = `seed-sim-${seed.tmdbId}`;
-            const existing = candidateMap.get(key);
-            if (existing) {
-              if (!existing.sources.includes(sourceTag)) existing.sources.push(sourceTag);
-            } else {
-              candidateMap.set(key, { item: sim, sources: [sourceTag] });
-            }
-          }
+          // "Similar" is a much weaker relation than "recommended": it keys off
+          // genre and keyword overlap, so it readily returns any thriller at
+          // all for a thriller, whereas "recommended" reflects what people who
+          // watched this actually went on to watch.
+          ingest(sCast.value.results, `seed-sim-${seed.tmdbId}`, 1.5);
         }
       }
 
-      // Process discover language-specific results
+      // Process discover language-specific results.
+      // These are browsed, not earned — nothing about the user's history points
+      // at them — so they carry no endorsement and stay language-filtered.
       for (const res of discoverResults) {
         if (res.status === 'fulfilled' && res.value?.res?.results) {
           const { lang, res: discoverRes, type } = res.value;
           for (const item of discoverRes.results) {
             if (mediaType && item.mediaType !== mediaType) continue;
             if (!preferredLanguages.includes(item.originalLanguage)) continue;
-
-            const resolved = { ...item, mediaType: type };
-            const key = mediaKey(resolved.mediaType, resolved.id);
-            if (dbKeys.has(key)) continue;
-
-            const sourceTag = `popular-${lang}`;
-            const existing = candidateMap.get(key);
-            if (existing) {
-              if (!existing.sources.includes(sourceTag)) existing.sources.push(sourceTag);
-            } else {
-              candidateMap.set(key, { item: resolved, sources: [sourceTag] });
-            }
+            addCandidate({ ...item, mediaType: type }, `popular-${lang}`, 0);
           }
         }
       }
@@ -391,16 +524,7 @@ class RecommendationService {
         for (const item of trendingResult.results) {
           if (mediaType && item.mediaType !== mediaType) continue;
           if (!preferredLanguages.includes(item.originalLanguage)) continue;
-
-          const key = mediaKey(item.mediaType, item.id);
-          if (dbKeys.has(key)) continue;
-
-          const existing = candidateMap.get(key);
-          if (existing) {
-            if (!existing.sources.includes('trending')) existing.sources.push('trending');
-          } else {
-            candidateMap.set(key, { item, sources: ['trending'] });
-          }
+          addCandidate(item, 'trending', 0);
         }
       }
 
@@ -409,7 +533,7 @@ class RecommendationService {
       // Score each candidate
       const scored: RecommendedItem[] = [];
 
-      for (const [, { item, sources }] of candidateMap) {
+      for (const [, { item, sources, endorsement, because }] of candidateMap) {
         let score = 0;
         const reasons: string[] = [];
 
@@ -434,29 +558,41 @@ class RecommendationService {
           if (bestTag) reasons.push(`You enjoy ${bestTag}`);
         }
 
-        // 2. Multi-source bonus (0-15)
+        // 2. Endorsement (0-50). How hard the user's own history argues for
+        //    this title — see `addCandidate`. This is the personalisation
+        //    signal, so it is the largest term after genre affinity, and it
+        //    is what the popularity terms below were previously drowning out.
+        const endorsementScore = Math.min(50, endorsement * 6);
+        score += endorsementScore;
+        if (endorsementScore > 12 && because) {
+          reasons.push(because);
+        }
+
+        // 3. Corroboration across independent sources (0-10). Weaker than it
+        //    was, because sources are no longer interchangeable: two weak
+        //    pointers should not rival one strong one.
         if (sources.length > 1) {
-          score += Math.min(15, sources.length * 5);
-          reasons.push('Multiple matches');
+          score += Math.min(10, (sources.length - 1) * 4);
         }
 
-        // 3. Quality score (0-15)
-        score += ((item.voteAverage || 0) / 10) * 15;
+        // 4. Quality (0-14), discounted when barely anyone has voted. A 9.5
+        //    from thirty people is noise, and it used to score higher than a
+        //    7.8 from two hundred thousand.
+        const voteConfidence = Math.min(1, Math.log10((item.voteCount || 0) + 1) / 3.5);
+        score += ((item.voteAverage || 0) / 10) * 14 * voteConfidence;
 
-        // 4. Community interest / Popularity score (0-15)
-        const popularityScore = Math.min(15, Math.log10(item.popularity || 1) * 4);
-        score += popularityScore;
+        // 5. Community interest (0-8). Kept deliberately small: this is the
+        //    term that makes every feed converge on the same blockbusters.
+        score += Math.min(8, Math.log10((item.popularity || 0) + 1) * 2.4);
 
-        // 5. Language score (0-10)
-        if (preferredLanguages.includes(item.originalLanguage)) {
-          score += 10;
-        }
-
-        // 6. Language affinity score (0-15) based on watch frequency
+        // 6. Language affinity (0-18), from how much the user actually watches
+        //    in that language — a far better signal than the flat bonus for
+        //    merely being on the settings list, which every candidate that got
+        //    this far already satisfied.
         const langCount = langCounts.get(item.originalLanguage) || 0;
-        score += (langCount / maxLangCount) * 15;
+        score += (langCount / maxLangCount) * 18;
 
-        // 7. Recency score (0-10).
+        // 7. Recency (0-10).
         // Decays gently so an acclaimed older title still competes, and
         // unreleased titles don't outrank everything by scoring above 10.
         if (item.releaseDate) {
@@ -468,7 +604,13 @@ class RecommendationService {
           }
         }
 
-        // 8. Loved director/actor boost (+25 points)
+        // 8. Unreleased titles cannot be watched tonight. They belong on the
+        //    Upcoming screen, not in a "watch this" feed.
+        if (item.releaseDate && item.releaseDate > new Date().toISOString().slice(0, 10)) {
+          score -= 20;
+        }
+
+        // 9. Loved director/actor boost (+25 points)
         const hasLovedPerson = sources.some(s => s.startsWith('loved-person-'));
         if (hasLovedPerson) {
           score += 25;
@@ -478,28 +620,33 @@ class RecommendationService {
           const pId = lpSource ? Number(lpSource.slice(lpSource.lastIndexOf('-') + 1)) : 0;
           const pInfo = peopleScores.get(pId);
           if (pInfo) {
-            reasons.push(pInfo.role === 'director' ? `Directed by ${pInfo.name}` : `Starring ${pInfo.name}`);
+            reasons.unshift(pInfo.role === 'director' ? `Directed by ${pInfo.name}` : `Starring ${pInfo.name}`);
           }
         }
 
-        // 9. Disliked director/actor penalty.
+        // 10. Disliked director/actor penalty.
         // Must outweigh the strongest positive signals, otherwise a
         // well-reviewed title from a disliked actor still surfaces.
         if (dislikedMediaSet.has(mediaKey(item.mediaType, item.id))) {
           score -= 60;
         }
 
-        // 10. Stable jitter (0-5) to keep the feed from looking frozen without
-        // reshuffling it on every single refresh. Derived from the item id so
-        // the same inputs always produce the same ordering.
-        score += ((item.id * 2654435761) % 1000) / 200;
+        // 11. Jitter (0-5), stable within the day and rotating across days —
+        // enough movement that the feed is not identical every morning,
+        // without reshuffling under the user mid-session.
+        score += stableJitter(item.id);
 
         if (reasons.length === 0) {
-          if (sources.includes('trending')) {
+          if (because) {
+            reasons.push(because);
+          } else if (sources.includes('trending')) {
             reasons.push('Trending now');
           } else if (sources.some(s => s.startsWith('popular-'))) {
+            // Resolved from the shared language table rather than a hand-kept
+            // list — the old inline map covered five languages, so a Korean or
+            // Japanese pick fell through to the generic wording.
             const langCode = sources.find(s => s.startsWith('popular-'))?.split('-')[1] || '';
-            const langName = langCode === 'hi' ? 'Hindi' : langCode === 'kn' ? 'Kannada' : langCode === 'ta' ? 'Tamil' : langCode === 'te' ? 'Telugu' : langCode === 'ml' ? 'Malayalam' : '';
+            const langName = LANGUAGES.find((l) => l.code === langCode)?.name;
             reasons.push(langName ? `Popular in ${langName}` : 'Popular in your languages');
           } else {
             reasons.push('Recommended for you');
@@ -778,6 +925,10 @@ class RecommendationService {
       }
 
       console.log(`[Personalized Recs] Generated ${finalRecs.length} recommendations. Languages present: ${Array.from(new Set(finalRecs.map(r => r.originalLanguage))).join(', ')}`);
+
+      if (finalRecs.length > 0) {
+        setCache(feedCacheKey, finalRecs, FEED_CACHE_TTL_MINUTES).catch(() => {});
+      }
       return finalRecs;
     } catch (error) {
       console.warn('Recommendation engine error:', error);
@@ -789,6 +940,18 @@ class RecommendationService {
    * Cold start: trending and popular content tailored to user settings languages with multiplexing.
    */
   async getRecommendationsForNewUser(limit: number = 120, mediaType?: MediaType): Promise<RecommendedItem[]> {
+    // Cached on the same terms as the personalised feed: a new user switching
+    // between the All/Movies/Series tabs should not re-run a dozen discovery
+    // requests each time.
+    const libraryVersion = await getLibraryVersion();
+    const feedCacheKey = `recs-cold:${mediaType ?? 'all'}:${limit}:${libraryVersion}`;
+    try {
+      const cached = await getCache<RecommendedItem[]>(feedCacheKey);
+      if (cached && cached.length > 0) return cached;
+    } catch {
+      // A cache miss is never a reason to fail.
+    }
+
     try {
       const langPref = await getPreference('PREF_LANGUAGES');
       const preferredLanguages: string[] = langPref
@@ -813,22 +976,30 @@ class RecommendationService {
         }
       }
 
-      // Discover popular items in each of the preferred languages
+      // Discover well-regarded titles in each of the preferred languages.
+      //
+      // A vote-count floor is the point here. TMDB's popularity score tracks
+      // activity volume, and nothing generates more of it than a long-running
+      // daily serial — so ordering by popularity alone filled a brand-new
+      // user's first-ever feed with soap operas rather than anything they
+      // might plausibly want to watch. The floor keeps titles that a real
+      // audience has actually rated.
       const discoverPromises: Promise<any>[] = [];
       for (const lang of preferredLanguages) {
         if (lang === 'en') continue;
+        const filters = {
+          withOriginalLanguage: lang,
+          sortBy: 'popularity.desc',
+          voteCountGte: COLD_START_MIN_VOTES,
+        };
         discoverPromises.push(
-          tmdbService.discover(mediaType || 'movie', {
-            withOriginalLanguage: lang,
-            sortBy: 'popularity.desc',
-          }).then((res) => ({ res, type: mediaType || 'movie' }))
+          tmdbService
+            .discover(mediaType || 'movie', filters)
+            .then((res) => ({ res, type: mediaType || 'movie' }))
         );
         if (!mediaType) {
           discoverPromises.push(
-            tmdbService.discover('tv', {
-              withOriginalLanguage: lang,
-              sortBy: 'popularity.desc',
-            }).then((res) => ({ res, type: 'tv' }))
+            tmdbService.discover('tv', filters).then((res) => ({ res, type: 'tv' }))
           );
         }
       }
@@ -860,8 +1031,11 @@ class RecommendationService {
         candidatesByLang.get(item.originalLanguage)!.push(item);
       }
 
+      // Ranked by how well-regarded a title is, with popularity as a much
+      // smaller term. Sorting on popularity alone is what put daily serials
+      // ahead of everything else.
       for (const list of candidatesByLang.values()) {
-        list.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+        list.sort((a, b) => coldStartScore(b) - coldStartScore(a));
       }
 
       // Split the floor across the languages that actually returned results,
@@ -945,8 +1119,8 @@ class RecommendationService {
           if (bestCandidate && bestCandidateLang) {
             finalRecs.push({
               ...bestCandidate,
-              score: bestCandidate.popularity || 0,
-              reason: 'Trending now',
+              score: coldStartScore(bestCandidate),
+              reason: coldStartReason(bestCandidate),
             });
             pointers.set(bestCandidateLang, (pointers.get(bestCandidateLang) || 0) + 1);
           } else {
@@ -957,14 +1131,17 @@ class RecommendationService {
           const item = candidatesByLang.get(bestLang)![ptr];
           finalRecs.push({
             ...item,
-            score: item.popularity || 0,
-            reason: 'Trending now',
+            score: coldStartScore(item),
+            reason: coldStartReason(item),
           });
           pointers.set(bestLang, ptr + 1);
           currentCounts.set(bestLang, (currentCounts.get(bestLang) || 0) + 1);
         }
       }
 
+      if (finalRecs.length > 0) {
+        setCache(feedCacheKey, finalRecs, FEED_CACHE_TTL_MINUTES).catch(() => {});
+      }
       return finalRecs;
     } catch {
       return [];

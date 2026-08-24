@@ -114,6 +114,7 @@ export function useDatabase() {
       totalMovies: stats.totalMovies,
       totalSeries: stats.totalSeries,
       totalHoursWatched: stats.totalHours,
+      titlesWithRuntime: stats.titlesWithRuntime,
       averageRating: stats.averageRating,
       favoriteGenres: genres.map((g) => ({ genre: g.genre, count: g.count })),
       topDirectors: directors.map((d) => ({ name: d.personName, count: d.count })),
