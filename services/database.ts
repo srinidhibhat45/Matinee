@@ -597,8 +597,10 @@ export async function initDatabase(): Promise<void> {
         FROM episode_ratings e JOIN watched_items w ON w.id=e.item_id
         WHERE w.media_type='tv' AND NOT EXISTS (SELECT 1 FROM preferences WHERE key='MIGRATION_EPISODE_PROGRESS_V1');
         INSERT OR IGNORE INTO preferences VALUES ('MIGRATION_EPISODE_PROGRESS_V1','done');`);
-      await getPreference('API_KEY_STORAGE');
-      await getPreference('PREF_GEMINI_API_KEY');
+      // Credential migration is optional; library access must survive storage errors.
+      for (const key of ['API_KEY_STORAGE', 'PREF_GEMINI_API_KEY']) {
+        try { await getPreference(key); } catch { console.warn('[Matinee] Credential migration deferred'); }
+      }
     } catch (error) {
       db = null;
       console.error('[Matinee DB] Initialisation failed:', error);
@@ -1203,12 +1205,19 @@ export async function clearExpiredCache(): Promise<number> {
 export async function getPreference(key: string): Promise<string | null> {
   if (key === 'PREF_GEMINI_API_KEY' || key === 'API_KEY_STORAGE') {
     const secretKey = key === 'API_KEY_STORAGE' ? '@matinee_api_key' : key;
-    const secret = await getSecret(secretKey);
     const database = await getDbAsync();
     const row = await database.getFirstAsync<{value:string}>('SELECT value FROM preferences WHERE key=?',[key]);
-    if (!secret && row?.value) await setSecret(secretKey,row.value);
-    await database.runAsync('DELETE FROM preferences WHERE key=?',[key]);
-    return secret ?? row?.value ?? null;
+    let secret: string | null = null;
+    try { secret = await getSecret(secretKey); } catch { /* SQLite remains readable. */ }
+    const value = secret || row?.value || null;
+    if (row?.value && value) {
+      try {
+        if (await setSecret(secretKey, value)) {
+          await database.runAsync('DELETE FROM preferences WHERE key=?',[key]);
+        }
+      } catch { /* Retry migration later without removing the original. */ }
+    }
+    return value;
   }
   const database = await getDbAsync();
   try {
@@ -1227,7 +1236,15 @@ export async function setPreference(
   key: string,
   value: string
 ): Promise<void> {
-  if (key === 'PREF_GEMINI_API_KEY' || key === 'API_KEY_STORAGE') { const secretKey = key === 'API_KEY_STORAGE' ? '@matinee_api_key' : key; if (value) await setSecret(secretKey,value); else await removeSecret(secretKey); notifyDbChanged(); return; }
+  if (key === 'PREF_GEMINI_API_KEY' || key === 'API_KEY_STORAGE') {
+    const secretKey = key === 'API_KEY_STORAGE' ? '@matinee_api_key' : key;
+    if (value) await setSecret(secretKey, value); else await removeSecret(secretKey);
+    // Explicit edits supersede any retained migration source, including removals.
+    const database = await getDbAsync();
+    await database.runAsync('DELETE FROM preferences WHERE key=?', [key]);
+    notifyDbChanged();
+    return;
+  }
   const database = await getDbAsync();
   try {
     await database.runAsync(

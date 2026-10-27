@@ -9,6 +9,9 @@ const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..');
 const memory = new Map();
 const remote = new Map();
+const secureMemory = new Map();
+let secureFailure = false;
+let secureMismatch = false;
 let online = true;
 const sqlite = new DatabaseSync(':memory:');
 const args = p => p.length === 1 && Array.isArray(p[0]) ? p[0] : p;
@@ -26,7 +29,7 @@ const mocks = {
  'expo-sqlite':{openDatabaseAsync:async()=>db},
  '@react-native-async-storage/async-storage':{default:storage,...storage},
  'react-native':{Platform:{OS:'web'}},
- 'expo-secure-store':{getItemAsync:storage.getItem,setItemAsync:storage.setItem,deleteItemAsync:storage.removeItem},
+ 'expo-secure-store':{getItemAsync:async k=>{if(secureFailure)throw Error('Native storage unavailable');return secureMismatch?null:secureMemory.get(k)??null;},setItemAsync:async(k,v)=>{if(secureFailure)throw Error('Native storage unavailable');secureMemory.set(k,v);},deleteItemAsync:async k=>secureMemory.delete(k)},
  'expo-crypto':{CryptoDigestAlgorithm:{SHA256:'sha256'},digestStringAsync:async(_,s)=>crypto.createHash('sha256').update(s).digest('hex')},
  'firebase/auth':{getAuth:()=>auth,initializeAuth:()=>auth,signOut:async()=>{auth.currentUser=null;},signInWithEmailAndPassword:async()=>{auth.currentUser={uid:'account-1',email:'test@example.com'};},createUserWithEmailAndPassword:async()=>{auth.currentUser={uid:'account-1',email:'test@example.com'};}},
  'firebase/firestore':{
@@ -56,7 +59,36 @@ let count=0;
 async function check(name,fn){await fn();count++;console.log(`✓ ${name}`);}
 (async()=>{
  const database=load('services/database.ts'); const activity=load('services/libraryActivity.ts');const {cloudSync}=load('services/cloudSync.ts');const logic=load('services/libraryLogic.ts');
- await database.initDatabase();
+ const secrets=load('services/secrets.ts');
+ mocks['react-native'].Platform.OS='android';
+ secureFailure=true;
+ sqlite.exec('CREATE TABLE preferences (key TEXT PRIMARY KEY, value TEXT);');
+ await db.runAsync('INSERT INTO preferences VALUES (?,?)',['API_KEY_STORAGE','legacy-tmdb']);
+ await db.runAsync('INSERT INTO preferences VALUES (?,?)',['PREF_GEMINI_API_KEY','legacy-gemini']);
+ await check('Android startup retains SQLite keys when secure storage fails',async()=>{
+  await database.initDatabase();
+  assert.equal(await database.getPreference('API_KEY_STORAGE'),'legacy-tmdb');
+  assert.equal(await database.getPreference('PREF_GEMINI_API_KEY'),'legacy-gemini');
+  assert.equal((await db.getFirstAsync('SELECT value FROM preferences WHERE key=?',['API_KEY_STORAGE'])).value,'legacy-tmdb');
+  assert.deepEqual(await database.getAllItems(),[]);
+ });
+ await check('Failed secure read/write retains legacy keys and allows saving',async()=>{
+  memory.set('@legacy','old-key');assert.equal(await secrets.getSecret('@legacy'),'old-key');
+  assert.equal(await secrets.setSecret('@legacy','new-key'),false);
+  assert.equal(await secrets.getSecret('@legacy'),'new-key');assert.equal(memory.get('@legacy'),'new-key');
+ });
+ await check('Migration only removes original credentials after successful read-back',async()=>{
+  secureFailure=false;secureMismatch=true;
+  assert.equal(await secrets.getSecret('@legacy'),'new-key');assert.equal(memory.get('@legacy'),'new-key');
+  assert.equal(await database.getPreference('API_KEY_STORAGE'),'legacy-tmdb');
+  assert.ok(await db.getFirstAsync('SELECT value FROM preferences WHERE key=?',['API_KEY_STORAGE']));
+  secureMismatch=false;
+  assert.equal(await secrets.getSecret('@legacy'),'new-key');assert.equal(memory.has('@legacy'),false);
+  assert.equal(await database.getPreference('API_KEY_STORAGE'),'legacy-tmdb');
+  assert.equal(await db.getFirstAsync('SELECT value FROM preferences WHERE key=?',['API_KEY_STORAGE']),null);
+  assert.equal(secureMemory.get('_matinee_api_key'),'legacy-tmdb');
+ });
+ mocks['react-native'].Platform.OS='web';
  const ratingOf=async(id,type)=>(await database.getRating((await database.getItem(id,type)).id))?.overallRating;
  const make=(id,type='movie',status='watchlist')=>({tmdbId:id,mediaType:type,title:`${type} ${id}`,posterPath:null,backdropPath:null,overview:'',releaseDate:'2020-01-01',genres:'[35]',originalLanguage:'hi',runtime:120,voteAverage:7,status,watchedDate:status==='watched'?'2026-10-01':null});
  const media=(id,type='movie')=>({id,mediaType:type,title:`${type} ${id}`,posterPath:null,backdropPath:null,overview:'',releaseDate:'2020-01-01',genreIds:[35],originalLanguage:'hi',runtime:120,voteAverage:7,voteCount:100,popularity:20});
