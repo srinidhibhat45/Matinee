@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -18,11 +18,10 @@ import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import { useTheme } from '../context/ThemeContext';
 import { useResponsive } from '../hooks/useResponsive';
-import { FAB } from './m3';
+import { FAB, Button } from './m3';
 import { NAVIGATION_BAR_HEIGHT } from './m3/Navigation';
 import { spacing } from '../constants/m3';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { getPreference } from '../services/database';
 import { recommendationService, MoodPreferences, MoodRecommendationResult } from '../services/recommendations';
 import { getImageUrl } from '../services/tmdb';
 import { MOVIE_GENRES, TV_GENRES } from '../constants/genres';
@@ -79,16 +78,17 @@ const ALL_GENRE_IDS = [
 // ─── Component ────────────────────────────────────────────────
 
 export default function AiRecommendFab() {
-  const { colors, isDark } = useTheme();
+  const { colors, isDark, reduceMotion } = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { isCompact } = useResponsive();
 
-  const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const requestId = useRef(0);
   const [modalVisible, setModalVisible] = useState(false);
   const [phase, setPhase] = useState<'form' | 'loading' | 'results'>('form');
 
   // Form state
+  const [morePreferences,setMorePreferences] = useState(false);
   const [selectedMood, setSelectedMood] = useState<string | null>(null);
   const [vibeIntensity, setVibeIntensity] = useState(3);
   const [selectedGenres, setSelectedGenres] = useState<number[]>([]);
@@ -102,30 +102,15 @@ export default function AiRecommendFab() {
 
 
 
-  // ── Check Gemini Key ───────────────────────────────────────
-
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const key = await getPreference('PREF_GEMINI_API_KEY');
-        setHasGeminiKey(!!key && key.trim().length > 0);
-      } catch {
-        setHasGeminiKey(false);
-      }
-    };
-    check();
-    // Re-check every time app focuses
-    const interval = setInterval(check, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
   // ── Handlers ───────────────────────────────────────────────
 
   const openModal = useCallback(() => {
     if (Platform.OS !== 'web') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
+    requestId.current++;
     setPhase('form');
+    setMorePreferences(false);
     setError(null);
     setModalVisible(true);
   }, []);
@@ -141,7 +126,8 @@ export default function AiRecommendFab() {
   }, []);
 
   const handleSubmit = useCallback(async () => {
-    if (!selectedMood) return;
+    if (!selectedMood || phase === 'loading') return;
+    const request = ++requestId.current;
 
     setPhase('loading');
     setError(null);
@@ -156,14 +142,16 @@ export default function AiRecommendFab() {
         duration,
       };
       const recs = await recommendationService.getMoodBasedRecommendations(prefs);
+      if (request !== requestId.current) return;
       setResults(recs);
       setPhase('results');
     } catch (err) {
+      if (request !== requestId.current) return;
       console.warn('[AiRecommendFab] Error:', err);
       setError('Something went wrong. Please try again.');
       setPhase('form');
     }
-  }, [selectedMood, vibeIntensity, selectedGenres, mediaType, era, duration]);
+  }, [selectedMood, vibeIntensity, selectedGenres, mediaType, era, duration, phase]);
 
   const handleTryAgain = useCallback(() => {
     handleSubmit();
@@ -176,16 +164,13 @@ export default function AiRecommendFab() {
 
   const handleCardPress = useCallback((id: number, mType: string) => {
     setModalVisible(false);
-    router.push(`/detail/${id}?type=${mType}`);
+    router.push({pathname:'/detail/[id]',params:{id:String(id),mediaType:mType === 'tv' ? 'tv' : 'movie'}});
   }, [router]);
 
   const closeModal = useCallback(() => {
+    requestId.current++;
     setModalVisible(false);
   }, []);
-
-  // ── Don't render if no Gemini key ──────────────────────────
-
-  if (!hasGeminiKey) return null;
 
   // ── Render ─────────────────────────────────────────────────
 
@@ -212,7 +197,7 @@ export default function AiRecommendFab() {
           icon="sparkles"
           variant="primary"
           onPress={openModal}
-          accessibilityLabel="Recommend something to watch"
+          accessibilityLabel="Pick for tonight"
           accessibilityHint="Opens a form that suggests titles based on your mood"
         />
       </View>
@@ -221,7 +206,7 @@ export default function AiRecommendFab() {
       <Modal
         visible={modalVisible}
         transparent
-        animationType="slide"
+        animationType={reduceMotion ? 'none' : 'slide'}
         onRequestClose={closeModal}
         statusBarTranslucent
       >
@@ -244,7 +229,7 @@ export default function AiRecommendFab() {
               <View style={styles.headerLeft}>
                 <Ionicons name="sparkles" size={20} color={accentColor} />
                 <Text style={[styles.modalTitle, { color: colors.text }]}>
-                  {phase === 'results' ? 'Your Picks' : 'Recommend Me'}
+                  {phase === 'results' ? 'Your picks' : 'Pick for tonight'}
                 </Text>
               </View>
               <TouchableOpacity
@@ -264,7 +249,7 @@ export default function AiRecommendFab() {
                   Finding your perfect picks...
                 </Text>
                 <Text style={[styles.loadingSubtext, { color: colors.muted }]}>
-                  AI is analyzing your taste
+                  Matching your preferences
                 </Text>
               </View>
             )}
@@ -315,6 +300,102 @@ export default function AiRecommendFab() {
                   ))}
                 </View>
 
+                {/* 4. Media Type */}
+                <Text style={[styles.sectionLabel, { color: colors.text }]}>Type</Text>
+                <View style={[styles.segmentRow, { backgroundColor: colors.elevated, borderColor: colors.border }]}>
+                  {MEDIA_TYPES.map((mt) => (
+                    <TouchableOpacity
+                      key={mt.value}
+                      style={[
+                        styles.segmentItem,
+                        mediaType === mt.value && {
+                          backgroundColor: accentColor,
+                        },
+                      ]}
+                      onPress={() => {
+                        setMediaType(mt.value);
+                        if (Platform.OS !== 'web') Haptics.selectionAsync();
+                      }}
+                      accessibilityRole="radio"
+                      accessibilityLabel={mt.label}
+                      accessibilityState={{ selected: mediaType === mt.value, checked: mediaType === mt.value }}
+                    >
+                      <Text style={styles.segmentIcon}>{mt.icon}</Text>
+                      <Text
+                        style={[
+                          styles.segmentText,
+                          { color: mediaType === mt.value ? onAccent : colors.secondary },
+                        ]}
+                      >
+                        {mt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                 {/* 6. Duration */}
+                <Text style={[styles.sectionLabel, { color: colors.text }]}>Duration</Text>
+                <View style={styles.gridContainer}>
+                  <View style={styles.gridRow}>
+                    {DURATIONS.slice(0, 2).map((d) => {
+                      const isSelected = duration === d;
+                      return (
+                        <TouchableOpacity
+                          key={d}
+                          style={[
+                            styles.gridCard,
+                            {
+                              backgroundColor: isSelected ? colors.accentMuted : colors.elevated,
+                              borderColor: isSelected ? accentColor : colors.border,
+                            },
+                          ]}
+                          onPress={() => {
+                            setDuration(d);
+                            if (Platform.OS !== 'web') Haptics.selectionAsync();
+                          }}
+                          accessibilityRole="radio"
+                          accessibilityLabel={d}
+                          accessibilityState={{ selected: isSelected, checked: isSelected }}
+                        >
+                          <Text style={[styles.gridCardTitle, { color: colors.text, fontWeight: isSelected ? '700' : '500' }]}>
+                            {d}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  <View style={styles.gridRow}>
+                    {DURATIONS.slice(2, 4).map((d) => {
+                      const isSelected = duration === d;
+                      return (
+                        <TouchableOpacity
+                          key={d}
+                          style={[
+                            styles.gridCard,
+                            {
+                              backgroundColor: isSelected ? colors.accentMuted : colors.elevated,
+                              borderColor: isSelected ? accentColor : colors.border,
+                            },
+                          ]}
+                          onPress={() => {
+                            setDuration(d);
+                            if (Platform.OS !== 'web') Haptics.selectionAsync();
+                          }}
+                          accessibilityRole="radio"
+                          accessibilityLabel={d}
+                          accessibilityState={{ selected: isSelected, checked: isSelected }}
+                        >
+                          <Text style={[styles.gridCardTitle, { color: colors.text, fontWeight: isSelected ? '700' : '500' }]}>
+                            {d}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+
+                <Button label={morePreferences ? 'Fewer preferences' : 'More preferences'} variant="text" icon={morePreferences ? 'chevron-up' : 'chevron-down'} onPress={() => setMorePreferences(!morePreferences)} accessibilityHint="Optional genres, pacing and release era" />
+                {morePreferences && <>
                  {/* 2. Vibe / Pacing Selector */}
                 <Text style={[styles.sectionLabel, { color: colors.text }]}>Vibe / Pacing</Text>
                 <View style={styles.verticalCardContainer}>
@@ -399,39 +480,6 @@ export default function AiRecommendFab() {
                       </TouchableOpacity>
                     );
                   })}
-                </View>
-
-                {/* 4. Media Type */}
-                <Text style={[styles.sectionLabel, { color: colors.text }]}>Type</Text>
-                <View style={[styles.segmentRow, { backgroundColor: colors.elevated, borderColor: colors.border }]}>
-                  {MEDIA_TYPES.map((mt) => (
-                    <TouchableOpacity
-                      key={mt.value}
-                      style={[
-                        styles.segmentItem,
-                        mediaType === mt.value && {
-                          backgroundColor: accentColor,
-                        },
-                      ]}
-                      onPress={() => {
-                        setMediaType(mt.value);
-                        if (Platform.OS !== 'web') Haptics.selectionAsync();
-                      }}
-                      accessibilityRole="radio"
-                      accessibilityLabel={mt.label}
-                      accessibilityState={{ selected: mediaType === mt.value, checked: mediaType === mt.value }}
-                    >
-                      <Text style={styles.segmentIcon}>{mt.icon}</Text>
-                      <Text
-                        style={[
-                          styles.segmentText,
-                          { color: mediaType === mt.value ? onAccent : colors.secondary },
-                        ]}
-                      >
-                        {mt.label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
                 </View>
 
                 {/* 5. Era */}
@@ -522,66 +570,7 @@ export default function AiRecommendFab() {
                   </TouchableOpacity>
                 </View>
 
-                 {/* 6. Duration */}
-                <Text style={[styles.sectionLabel, { color: colors.text }]}>Duration</Text>
-                <View style={styles.gridContainer}>
-                  <View style={styles.gridRow}>
-                    {DURATIONS.slice(0, 2).map((d) => {
-                      const isSelected = duration === d;
-                      return (
-                        <TouchableOpacity
-                          key={d}
-                          style={[
-                            styles.gridCard,
-                            {
-                              backgroundColor: isSelected ? colors.accentMuted : colors.elevated,
-                              borderColor: isSelected ? accentColor : colors.border,
-                            },
-                          ]}
-                          onPress={() => {
-                            setDuration(d);
-                            if (Platform.OS !== 'web') Haptics.selectionAsync();
-                          }}
-                          accessibilityRole="radio"
-                          accessibilityLabel={d}
-                          accessibilityState={{ selected: isSelected, checked: isSelected }}
-                        >
-                          <Text style={[styles.gridCardTitle, { color: colors.text, fontWeight: isSelected ? '700' : '500' }]}>
-                            {d}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                  <View style={styles.gridRow}>
-                    {DURATIONS.slice(2, 4).map((d) => {
-                      const isSelected = duration === d;
-                      return (
-                        <TouchableOpacity
-                          key={d}
-                          style={[
-                            styles.gridCard,
-                            {
-                              backgroundColor: isSelected ? colors.accentMuted : colors.elevated,
-                              borderColor: isSelected ? accentColor : colors.border,
-                            },
-                          ]}
-                          onPress={() => {
-                            setDuration(d);
-                            if (Platform.OS !== 'web') Haptics.selectionAsync();
-                          }}
-                          accessibilityRole="radio"
-                          accessibilityLabel={d}
-                          accessibilityState={{ selected: isSelected, checked: isSelected }}
-                        >
-                          <Text style={[styles.gridCardTitle, { color: colors.text, fontWeight: isSelected ? '700' : '500' }]}>
-                            {d}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
+                </>}
 
                 {/* CTA */}
                 <TouchableOpacity
@@ -851,6 +840,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   moodChip: {
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
@@ -919,6 +909,8 @@ const styles = StyleSheet.create({
 
   // Genre chips
   genreChip: {
+    minHeight: 48,
+    justifyContent: 'center',
     paddingHorizontal: 12,
     paddingVertical: 7,
     borderRadius: 16,
@@ -937,6 +929,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   segmentItem: {
+    minHeight: 48,
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',

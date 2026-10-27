@@ -1,6 +1,5 @@
-import { useNotice } from '../../context/NoticeContext';
 import React, { useState, useCallback, useMemo } from 'react';
-import { View, StyleSheet, ScrollView, RefreshControl, Share } from 'react-native';
+import { View, StyleSheet, ScrollView, RefreshControl } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -59,7 +58,6 @@ function Section({
 
 export default function StatsScreen() {
   const router = useRouter();
-  const notice = useNotice();
   const { isReady, getStats } = useDatabase();
   const { colors, isDark } = useTheme();
   const insets = useSafeAreaInsets();
@@ -229,8 +227,6 @@ export default function StatsScreen() {
         </View>
 
         {/* Headline metrics */}
-        {!!stats?.totalWatched && <View style={{paddingHorizontal:gutter,paddingBottom:16}}><Button label={`Share my ${selectedYear} recap`} icon="share-outline" variant="tonal" onPress={()=>{Share.share({message:`My Matinee ${selectedYear}: ${stats.totalMovies} movies, ${stats.totalSeries} series, ${stats.totalHoursWatched} hours${stats.averageRating?`, average rating ${stats.averageRating.toFixed(1)}/10`:''}.`}).catch(()=>notice({message:'Sharing is unavailable on this device.'}));}}/></View>}
-
         <View style={[styles.statsGrid, { paddingHorizontal: gutter }]}>
           <StatCard
             label="Movies"

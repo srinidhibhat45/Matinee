@@ -1,7 +1,7 @@
 import { bookmarkTitle } from '../../services/libraryActions';
 import DetailTools from '../../components/library/DetailTools';
 import EpisodeProgress from '../../components/library/EpisodeProgress';
-import StreamingAvailability from '../../components/library/StreamingAvailability';
+import PosterPlayButton from '../../components/library/PosterPlayButton';
 import { useLibrary, refreshLibrary } from '../../hooks/useLibrary';
 import { toggleBookmark, snapshotItem, localDay, addViewing, setWatching, markEpisode } from '../../services/libraryActivity';
 import { useNotice } from '../../context/NoticeContext';
@@ -15,7 +15,6 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Dimensions,
-  Linking,
   TextInput,
   Animated,
   Pressable,
@@ -97,15 +96,7 @@ const isEpFuture = (dateStr: string | null) => {
 
 const STAR_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-/**
- * YouTube's brand red, darkened for light backgrounds.
- *
- * Pure #FF0000 only reaches 2.8:1 against a light surface, under the 3:1 that
- * WCAG 1.4.11 requires for a meaningful icon. The darker tone stays
- * recognisably YouTube while clearing the bar.
- */
-const YOUTUBE_RED_DARK_BG = '#FF3B30';
-const YOUTUBE_RED_LIGHT_BG = '#CC0000';
+
 
 /**
  * A 1–10 star input.
@@ -263,8 +254,11 @@ export default function DetailScreen() {
   const actionBusy = useRef(false);
   const detailScroll = useRef<ScrollView>(null);
   const episodeFormY = useRef(0);
+  const episodeProgressY = useRef(0);
+  const pendingProgressScroll = useRef(false);
+  const [showEpisodeProgress,setShowEpisodeProgress] = useState(false);
   const isBookmarked = library.items.some(i=>i.tmdbId===Number(id)&&i.mediaType===(mt||'movie')&&i.status==='watchlist') || library.activity.some(r=>r.key===`bookmark:${mt||'movie'}:${id}`);
-  const { colors, isDark, reduceMotion } = useTheme();
+  const { colors, reduceMotion } = useTheme();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useResponsive();
   const mediaType = (mt || 'movie') as MediaType;
@@ -275,7 +269,6 @@ export default function DetailScreen() {
   const [snackbar, setSnackbar] = useState<string | null>(null);
   const showSnackbar = useCallback((message: string) => setSnackbar(message), []);
 
-  const YOUTUBE_RED = isDark ? YOUTUBE_RED_DARK_BG : YOUTUBE_RED_LIGHT_BG;
 
   /** Foreground for the AI taste-match badge, matched to its container. */
   const matchScoreColor = useCallback(
@@ -823,15 +816,6 @@ export default function DetailScreen() {
     [router]
   );
 
-  const openTrailer = useCallback(() => {
-    if (!details?.videos) return;
-    const trailer = details.videos.find(
-      (v: any) => v.type === 'Trailer' && v.site === 'YouTube'
-    ) || details.videos[0];
-    if (trailer) {
-      Linking.openURL(`https://www.youtube.com/watch?v=${trailer.key}`);
-    }
-  }, [details]);
 
   if (loading) {
     return (
@@ -897,15 +881,6 @@ export default function DetailScreen() {
     : [];
   const episodes = activeSeasonNumber !== null ? seasonEpisodes[activeSeasonNumber] : null;
 
-  const providers = [
-    ...(details.watchProviders?.flatrate || []),
-    ...(details.watchProviders?.buy || []).filter(
-      (b: any) => !(details.watchProviders?.flatrate || []).some((f: any) => f.provider_id === b.provider_id)
-    ),
-  ].slice(0, 5);
-  const hasTrailer = details.videos?.some(
-    (v: any) => v.type === 'Trailer' && v.site === 'YouTube'
-  );
   const releaseYear = details.releaseDate?.split('-')[0] || '';
   const isUpcoming = details.releaseDate && new Date(details.releaseDate) > new Date();
   const formattedReleaseDate = details.releaseDate
@@ -1276,12 +1251,16 @@ export default function DetailScreen() {
         {/* Main Info */}
         <View style={styles.mainInfo}>
           <View style={styles.posterRow}>
-            {!!details.posterPath && (
-              <Image
-                source={{ uri: getImageUrl(details.posterPath, 'w342') || "" }}
-                style={[styles.poster, { backgroundColor: colors.card }]}
-              />
-            )}
+            <View style={{position: 'relative', alignSelf: 'flex-start', marginTop: -56}}>
+              {details.posterPath ? (
+                <Image source={{uri: getImageUrl(details.posterPath, 'w342') || ''}} style={[styles.poster, {marginTop: 0, backgroundColor: colors.card}]} />
+              ) : (
+                <View style={[styles.poster, {marginTop: 0, backgroundColor: colors.card, alignItems: 'center', justifyContent: 'center'}]}>
+                  <Ionicons name="film-outline" size={32} color={colors.muted} />
+                </View>
+              )}
+              <PosterPlayButton item={details} />
+            </View>
             <View style={styles.titleArea}>
               <Text style={[styles.title, { color: colors.text }]}>{details.title}</Text>
               <View style={styles.metaRow}>
@@ -1486,67 +1465,10 @@ export default function DetailScreen() {
           )}
         </View>
 
-        <DetailTools item={details} />
-        <StreamingAvailability providers={details.watchProviders} />
-
-        {/* Media & Links Row */}
-        <View style={[styles.actionRow, { marginTop: 8 }]}>
-          {hasTrailer && (
-            <TouchableOpacity
-              style={[styles.actionButton, { backgroundColor: colors.elevated, borderColor: colors.border }]}
-              onPress={openTrailer}
-              accessibilityRole="link"
-              accessibilityLabel="Watch trailer"
-              accessibilityHint="Opens YouTube"
-            >
-              <Ionicons name="logo-youtube" size={20} color={YOUTUBE_RED} />
-              <Text style={[styles.actionButtonText, { color: colors.text }]}>Trailer</Text>
-            </TouchableOpacity>
-          )}
-
-          <TouchableOpacity
-            style={[styles.actionButton, { backgroundColor: colors.elevated, borderColor: colors.border }]}
-            onPress={() => {
-              const query = encodeURIComponent(`${details.title} ${mediaType === 'tv' ? 'soundtrack' : 'OST album'}`);
-              Linking.openURL(`https://music.youtube.com/search?q=${query}`);
-            }}
-            accessibilityRole="link"
-            accessibilityLabel="Find the soundtrack"
-            accessibilityHint="Opens YouTube Music"
-          >
-            <Ionicons name="musical-notes" size={20} color={YOUTUBE_RED} />
-            <Text style={[styles.actionButtonText, { color: colors.text }]}>Soundtrack</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.actionButton,
-              { backgroundColor: colors.elevated, borderColor: colors.border },
-              itemStatus === 'not_interested' && { borderColor: colors.accent, backgroundColor: colors.accentMuted },
-            ]}
-            onPress={() => handleAction('not_interested')}
-            activeOpacity={0.7}
-            accessibilityRole="togglebutton"
-            accessibilityLabel="Not interested"
-            accessibilityHint="Hides this title from recommendations"
-            accessibilityState={{ selected: itemStatus === 'not_interested' }}
-          >
-            <Ionicons
-              name={itemStatus === 'not_interested' ? 'eye-off' : 'eye-off-outline'}
-              size={20}
-              color={itemStatus === 'not_interested' ? colors.accent : colors.text}
-            />
-            <Text
-              style={[
-                styles.actionButtonText,
-                { color: colors.text },
-                itemStatus === 'not_interested' && { color: colors.accent },
-              ]}
-            >
-              No Interest
-            </Text>
-          </TouchableOpacity>
-        </View>
+        <DetailTools item={details} onHide={() => handleAction('not_interested')} hidden={itemStatus === 'not_interested'} onEpisodes={mediaType === 'tv' ? ()=>{
+          if (showEpisodeProgress) detailScroll.current?.scrollTo({y:episodeProgressY.current,animated:!reduceMotion});
+          else {pendingProgressScroll.current=true;setShowEpisodeProgress(true);}
+        } : undefined} />
 
         {/* Calendar Button for upcoming */}
         {!!(details.releaseDate && new Date(details.releaseDate) > new Date()) && (
@@ -1682,7 +1604,10 @@ export default function DetailScreen() {
           </View>
         )}
 
-        {mediaType === 'tv' && <EpisodeProgress item={details} ratings={episodeRatings} onRate={(season,episode)=>{setSeasonInput(String(season));setEpisodeInput(String(episode));detailScroll.current?.scrollTo({y:episodeFormY.current,animated:!reduceMotion});showSnackbar(`Rating S${season} E${episode}`);}} />}
+        {mediaType === 'tv' && showEpisodeProgress && <View onLayout={event=>{
+          episodeProgressY.current=event.nativeEvent.layout.y;
+          if(pendingProgressScroll.current){pendingProgressScroll.current=false;detailScroll.current?.scrollTo({y:episodeProgressY.current,animated:!reduceMotion});}
+        }}><EpisodeProgress item={details} ratings={episodeRatings} onClose={()=>setShowEpisodeProgress(false)} onRate={(season,episode)=>{setSeasonInput(String(season));setEpisodeInput(String(episode));detailScroll.current?.scrollTo({y:episodeFormY.current,animated:!reduceMotion});showSnackbar(`Rating S${season} E${episode}`);}} /></View>}
 
         {/* Episode Logging Section for TV Series */}
         {mediaType === 'tv' && (

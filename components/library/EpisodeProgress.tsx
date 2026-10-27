@@ -18,11 +18,13 @@ interface Episode {
 export default function EpisodeProgress({
   item,
   ratings,
-  onRate
+  onRate,
+  onClose
 }: {
   item: TMDBMediaDetails;
   ratings: EpisodeRating[];
   onRate: (season: number, episode: number) => void;
+  onClose?: () => void;
 }) {
   const {
     colors
@@ -80,8 +82,7 @@ export default function EpisodeProgress({
     paddingVertical: 20,
     gap: 12
   }}>
-    <Text variant="titleLarge" accessibilityRole="header">Seasons & episode progress</Text>
-    <Text variant="bodyMedium" color={colors.onSurfaceVariant}>Watch first. Rate only if you want to.</Text>
+    <View style={{flexDirection:'row',alignItems:'center',gap:8}}><Text variant="titleMedium" accessibilityRole="header" style={{flex:1}}>Episode progress</Text>{onClose&&<IconButton icon="close" onPress={onClose} accessibilityLabel="Close episode progress"/>}</View>
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{
       gap: 8
     }}>{seasons.map(s => <Chip key={s.season_number} label={s.name || `Season ${s.season_number}`} variant="filter" selected={season === s.season_number} disabled={busy} onPress={() => setSeason(s.season_number)} />)}</ScrollView>

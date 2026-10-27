@@ -1,11 +1,7 @@
-import AvailableBookmarks from '../../components/library/AvailableBookmarks';
 import { bookmarkTitle } from '../../services/libraryActions';
-import { normalizeCard } from '../../components/library/QuickActions';
+import { normalizeCard } from '../../services/libraryActions';
 import { snapshotItem } from '../../services/libraryActivity';
 import { useNotice } from '../../context/NoticeContext';
-import TonightPicker from '../../components/library/TonightPicker';
-import ContinueWatching from '../../components/library/ContinueWatching';
-import QuickActions from '../../components/library/QuickActions';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -888,7 +884,7 @@ export default function DiscoverScreen() {
               ) : null}
             </View>
           </View>
-        </Card><QuickActions item={item} /></View>
+        </Card></View>
       );
     },
     [handleItemPress, handleItemLongPress, colors, formatReleaseLabel]
@@ -977,7 +973,7 @@ export default function DiscoverScreen() {
               </Text>
             ) : null}
           </View>
-        </Card><QuickActions item={item} /></View>
+        </Card></View>
       );
     },
     [handleItemPress, handleItemLongPress, colors, gridCardWidth, gridPosterHeight]
@@ -1272,9 +1268,6 @@ export default function DiscoverScreen() {
               contentContainerStyle={{ paddingBottom: listBottomPadding }}
             >
               {browseControls}
-              <TonightPicker />
-              <ContinueWatching />
-              <AvailableBookmarks />
 
               {homeLoading ? (
                 <Loading label="Loading your feed" style={styles.topSpaced} />

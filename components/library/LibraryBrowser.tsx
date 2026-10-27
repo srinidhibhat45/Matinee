@@ -5,7 +5,7 @@ import { useLibrary, refreshLibrary } from '../../hooks/useLibrary';
 import { useResponsive, gridItemWidth } from '../../hooks/useResponsive';
 import { useTheme } from '../../context/ThemeContext';
 import { useNotice } from '../../context/NoticeContext';
-import { Button, Chip, Text, SearchField, IconButton, BottomSheet, ListItem, TextField, Loading } from '../m3';
+import { Button, Chip, Text, SearchField, IconButton, BottomSheet, ListItem, TextField, Loading, SegmentedButtons } from '../m3';
 import MovieCard from '../MovieCard';
 import EmptyState from '../EmptyState';
 import { selectLibrary, type LibrarySection, type LibrarySort } from '../../services/libraryLogic';
@@ -13,7 +13,6 @@ import { createCollection, setCollectionMember, snapshotItem, writeActivity, tog
 import { deleteItem, updateItem } from '../../services/database';
 import { notificationService } from '../../services/notifications';
 import type { WatchedItem } from '../../types';
-import { normalizeCard } from './QuickActions';
 import Diary from './Diary';
 const SECTIONS: {
   key: LibrarySection;
@@ -59,12 +58,13 @@ export default function LibraryBrowser({
   const notice = useNotice();
   const router = useRouter();
   const [section, setSection] = useState<LibrarySection>(initialTab === 'watched' ? 'watched' : 'watchlist');
+  const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<LibrarySort>('recent');
   const [type, setType] = useState<string | null>(initialMediaType === 'movie' || initialMediaType === 'tv' ? initialMediaType : null);
   const [collection, setCollection] = useState<string | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
-  const [sheet, setSheet] = useState<'sort' | 'collections' | null>(null);
+  const [sheet, setSheet] = useState<'tools' | 'sort' | 'collections' | null>(null);
   const [name, setName] = useState('');
   const [focused, setFocused] = useState<WatchedItem | null>(null);
   const [busy, setBusy] = useState(false);
@@ -116,35 +116,49 @@ export default function LibraryBrowser({
   return <View style={{
     flex: 1
   }} onLayout={e => setContainerWidth(e.nativeEvent.layout.width)}>
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{
-      flexGrow: 0
-    }} contentContainerStyle={{
+    <View style={{
       paddingHorizontal: gutter,
-      gap: 8,
       paddingBottom: 12
     }}>
-      {SECTIONS.map(s => <Chip key={s.key} label={s.label + (s.key === 'watchlist' || s.key === 'watched' ? ` (${selectLibrary(items, activity, s.key, '', null, 'recent').length})` : '')} variant="filter" selected={section === s.key} onPress={() => {
-        setSection(s.key);
+      <SegmentedButtons options={SECTIONS.slice(0, 2).map(s => ({
+        value: s.key,
+        label: `${s.label} (${selectLibrary(items, activity, s.key, '', null, 'recent').length})`
+      }))} value={section} onChange={value => {
+        setSection(value);
         setSelected([]);
         setQuery('');
-      }} />)}
-    </ScrollView>
+        setCollection(null);
+      }} accessibilityLabel="Library section" />
+    </View>
+    {!['watchlist', 'watched'].includes(section) && <View style={{
+      paddingHorizontal: gutter,
+      paddingBottom: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between'
+    }}>
+      <Text variant="titleMedium">{SECTIONS.find(s => s.key === section)?.label}</Text>
+      <Button label="Back to bookmarks" variant="text" onPress={() => setSection('watchlist')} />
+    </View>}
     {section === 'diary' ? <Diary bottomPadding={bottomPadding} /> : <>
       <View style={{
         paddingHorizontal: gutter,
         gap: 8,
         paddingBottom: 12
       }}>
-        <SearchField value={query} onChangeText={setQuery} placeholder="Search your library" accessibilityLabel="Search your library" onClear={() => setQuery('')} />
-        <View style={{
-          flexDirection: 'row',
-          flexWrap: 'wrap',
-          gap: 8,
-          alignItems: 'center'
-        }}>
+        {(searchOpen || !!query) && <SearchField autoFocus value={query} onChangeText={setQuery} placeholder="Search your library" accessibilityLabel="Search your library" onClear={() => {
+          setQuery('');
+          setSearchOpen(false);
+        }} />}
+        <View style={{flexDirection:'row',alignItems:'center',gap:4}}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{flex:1}} contentContainerStyle={{gap:8}}>
           {['All', 'Movies', 'Series'].map((label, index) => <Chip key={label} label={label} selected={type === [null, 'movie', 'tv'][index]} variant="filter" onPress={() => setType([null, 'movie', 'tv'][index])} />)}
-          <IconButton icon="swap-vertical-outline" accessibilityLabel="Sort library" onPress={() => setSheet('sort')} />
-          <IconButton icon="folder-outline" accessibilityLabel="Collections" onPress={() => setSheet('collections')} />
+          </ScrollView>
+          <IconButton icon="search-outline" accessibilityLabel={searchOpen ? 'Close library search' : 'Search library'} onPress={() => {
+            setSearchOpen(!searchOpen);
+            setQuery('');
+          }} />
+          <IconButton icon="ellipsis-horizontal" accessibilityLabel="More library tools" onPress={() => setSheet('tools')} />
         </View>
         {collection && <Chip label={collections.find(c => c.payload.id === collection)?.payload.name ?? 'Collection'} variant="input" selected onRemove={() => setCollection(null)} onPress={() => setSheet('collections')} />}
         {selected.length > 0 ? <View style={{
@@ -176,7 +190,7 @@ export default function LibraryBrowser({
             <Button label="Remove" variant="outlined" tone="error" disabled={busy} onPress={() => run(() => remove(selectedItems))} />
             <Button label="Cancel" variant="text" onPress={() => setSelected([])} />
           </View>
-        </View> : <Text variant="bodySmall" color={colors.onSurfaceVariant}>{visible.length} {visible.length === 1 ? 'title' : 'titles'} · Hold a poster to select multiple</Text>}
+        </View> : null}
       </View>
       {!ready ? <Loading label="Loading your library" /> : <FlatList data={visible} key={posterColumns} numColumns={posterColumns} keyExtractor={i => String(i.id)} contentContainerStyle={{
         paddingHorizontal: gutter,
@@ -192,7 +206,7 @@ export default function LibraryBrowser({
         borderRadius: 12,
         backgroundColor: selected.includes(item.id) ? colors.secondaryContainer : 'transparent'
       }}>
-          <MovieCard item={asCard(item)} width={cardWidth} showMediaTypeBadge onPress={() => {
+          <MovieCard item={asCard(item)} selected={selected.includes(item.id)} width={cardWidth} showMediaTypeBadge onPress={() => {
           if (selected.length) setSelected(s => s.includes(item.id) ? s.filter(id => id !== item.id) : [...s, item.id]);else router.push({
             pathname: '/detail/[id]',
             params: {
@@ -200,10 +214,21 @@ export default function LibraryBrowser({
               mediaType: item.mediaType
             }
           });
-        }} onLongPress={item.id > 0 ? () => setSelected(s => s.includes(item.id) ? s.filter(id => id !== item.id) : [...s, item.id]) : undefined} />
-          <Button label={selected.includes(item.id) ? 'Selected' : 'Actions'} icon={selected.includes(item.id) ? 'checkmark' : 'ellipsis-horizontal'} variant="text" compact onPress={() => selected.length ? setSelected(s => s.includes(item.id) ? s.filter(id => id !== item.id) : [...s, item.id]) : setFocused(item)} />
+        }} onLongPress={() => selected.length && item.id > 0 ? setSelected(s => s.includes(item.id) ? s.filter(id => id !== item.id) : [...s, item.id]) : setFocused(item)} />
+
         </View>} ListEmptyComponent={<EmptyState icon="library-outline" title={query || collection ? 'No matching titles' : section === 'hidden' ? 'No hidden titles' : section === 'watching' ? 'Start something good' : 'Your library starts here'} subtitle={query || collection ? 'Try another search or clear the collection filter.' : 'Find a title in Discover to bookmark it or log something you have seen.'} actionLabel="Discover titles" onAction={() => router.navigate('/(tabs)')} compact />} />}
     </>}
+    <BottomSheet visible={sheet === 'tools'} title="Library tools" onDismiss={() => setSheet(null)}>
+      <ListItem headline="Sort titles" leadingIcon="swap-vertical-outline" onPress={() => setSheet('sort')} />
+      <ListItem headline="Collections" leadingIcon="folder-outline" onPress={() => setSheet('collections')} />
+      {SECTIONS.slice(2).map(s => <ListItem key={s.key} headline={s.label} leadingIcon={s.key === 'watching' ? 'tv-outline' : s.key === 'diary' ? 'journal-outline' : 'eye-off-outline'} onPress={() => {
+        setSection(s.key);
+        setCollection(null);
+        setSelected([]);
+        setQuery('');
+        setSheet(null);
+      }} />)}
+    </BottomSheet>
     <BottomSheet visible={sheet === 'sort'} title="Sort library" onDismiss={() => setSheet(null)}>
       {([{
         key: 'recent',
@@ -274,6 +299,15 @@ export default function LibraryBrowser({
           });
           setFocused(null);
         }} />
+        {focused.id > 0 && <ListItem headline="Select multiple titles" leadingIcon="checkmark-circle-outline" onPress={() => {
+          setSelected([focused.id]);
+          setFocused(null);
+        }} />}
+        {focused.id > 0 && <ListItem headline="Add to collection" leadingIcon="folder-outline" onPress={() => {
+          setSelected([focused.id]);
+          setFocused(null);
+          setSheet('collections');
+        }} />}
         {section === 'hidden' && <ListItem headline="Show in recommendations again" leadingIcon="eye-outline" onPress={() => run(async () => {
           if (focused.status === 'not_interested' && focused.id > 0) await updateItem(focused.id, {
             status: 'watchlist'

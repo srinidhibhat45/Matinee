@@ -1,4 +1,3 @@
-import QuickActions from './library/QuickActions';
 import { getImageUrl } from '../services/tmdb';
 import React, { useEffect, useMemo, useState } from 'react';
 import { View, Image, StyleSheet } from 'react-native';
@@ -32,6 +31,7 @@ interface MovieCardProps {
   width?: number;
   showRating?: boolean;
   showMediaTypeBadge?: boolean;
+  selected?: boolean;
 }
 
 const SIZE_CONFIG = {
@@ -57,6 +57,7 @@ export default function MovieCard({
   width,
   showRating = true,
   showMediaTypeBadge = false,
+  selected = false,
 }: MovieCardProps) {
   const { colors } = useTheme();
   const [failed,setFailed] = useState(false);
@@ -97,13 +98,14 @@ export default function MovieCard({
     .join(', ');
 
   return (
-    <View style={{width:cardWidth}}><Touchable
+    <Touchable
       onPress={() => onPress?.(item)}
       onLongPress={onLongPress ? () => onLongPress(item) : undefined}
       stateLayerColor={colors.onSurface}
       borderRadius={shape.medium}
       accessibilityRole="button"
       accessibilityLabel={a11yLabel}
+      accessibilityState={{selected}}
       accessibilityHint={onLongPress ? 'Double tap to open. Long press for quick actions.' : undefined}
       style={[styles.container, { width: cardWidth }]}
     >
@@ -178,7 +180,7 @@ export default function MovieCard({
           </Text>
         ) : null}
       </View>
-    </Touchable><QuickActions item={item} /></View>
+    </Touchable>
   );
 }
 

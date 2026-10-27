@@ -1,5 +1,5 @@
 import { bookmarkTitle } from '../../services/libraryActions';
-import { normalizeCard } from '../../components/library/QuickActions';
+import { normalizeCard } from '../../services/libraryActions';
 import { snapshotItem } from '../../services/libraryActivity';
 import { useNotice } from '../../context/NoticeContext';
 import React, { useState, useEffect, useCallback, useRef } from 'react';

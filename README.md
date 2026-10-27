@@ -228,11 +228,11 @@ To enable automated builds on your fork or repository:
 
 ## Everyday viewing tools
 
-- **Discover:** a compact Pick for Tonight flow finds three recommendations using mood, runtime, language and optional subscription filters. Continue Watching shows tracked series. Check released bookmarks against your subscriptions on demand.
-- **Library:** Bookmarks and Seen remain directly accessible, alongside Watching, Diary and Hidden. Search, sort, filter by media type, and hold a poster to select several titles. Create collections and add/remove titles without changing their viewing status.
-- **Quick actions:** bookmark or open the logging form directly from poster cards and search results. A bookmark can coexist with a Seen entry and its rating. Removal supports Undo, including existing ratings and episode logs.
-- **Detail:** log without a rating, record a rewatch and diary note, track episodes independently, mark a released season watched, and steer recommendations. Streaming lists separate subscriptions, rental and purchase in your selected country.
-- **Stats:** existing title counts, ratings, watch time and charts remain in place; share a yearly recap. Diary recap totals describe explicitly logged viewings separately from Seen statistics.
+- **Discover:** search and recommendations come first, followed by the familiar poster rails. The existing recommendation button handles optional mood-based discovery. No provider listings or subscription sections clutter the feed.
+- **Library:** Bookmarks and Seen are the two primary sections. Search, sort, collections, Watching, Diary and Hidden are available through the toolbar and Library tools menu. Hold a poster for quick actions or to start selecting several titles. Create collections and add/remove titles without changing their viewing status.
+- **Quick actions:** tap a poster for title details or hold it to bookmark or log. Posters stay compact without a repeated row of buttons. A bookmark can coexist with a Seen entry and its rating. Removal supports Undo, including existing ratings and episode logs.
+- **Detail:** log without a rating, record a rewatch and diary note, track episodes independently, mark a released season watched, and steer recommendations. Optional streaming options open from a small play button on the detail poster, with trailer fallback when no regional listing is supplied. Extra tracking, diary and recommendation-feedback tools are behind More.
+- **Stats:** existing title counts, ratings, watch time and charts remain in place; optional recap sharing is kept in Diary. Diary recap totals describe explicitly logged viewings separately from Seen statistics.
 - **Storage:** additive migrations preserve existing records and rated episodes. Backups include collections, diary entries and progress; version 1 backups remain supported. Restore runs transactionally.
 - **Sync:** durable pending writes, typed movie/series IDs, conflict timestamps and deletion boundaries prevent common collisions and stale data restoration. See [account sync rollout](docs/account-sync.md) for the Firebase configuration required for account-based sync.
 
