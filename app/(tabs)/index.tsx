@@ -1,3 +1,11 @@
+import AvailableBookmarks from '../../components/library/AvailableBookmarks';
+import { bookmarkTitle } from '../../services/libraryActions';
+import { normalizeCard } from '../../components/library/QuickActions';
+import { snapshotItem } from '../../services/libraryActivity';
+import { useNotice } from '../../context/NoticeContext';
+import TonightPicker from '../../components/library/TonightPicker';
+import ContinueWatching from '../../components/library/ContinueWatching';
+import QuickActions from '../../components/library/QuickActions';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -10,7 +18,7 @@ import {
   BackHandler,
 } from 'react-native';
 import { useRouter, useFocusEffect, useNavigation } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { tmdbService, getImageUrl } from '../../services/tmdb';
 import { recommendationService } from '../../services/recommendations';
@@ -82,6 +90,7 @@ const MEDIA_TABS: { value: TabType; label: string }[] = [
 
 export default function DiscoverScreen() {
   const router = useRouter();
+  const notice = useNotice();
   const navigation = useNavigation();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
@@ -90,8 +99,8 @@ export default function DiscoverScreen() {
   // Poster tiles are sized from the live window width so the grid reflows on
   // rotation, on foldables, and in a resized browser window.
   const gridCardWidth = useMemo(
-    () => gridItemWidth(width, posterColumns, gutter, GRID_GAP),
-    [width, posterColumns, gutter]
+    () => gridItemWidth(width - (isCompact ? 0 : 80), posterColumns, gutter, GRID_GAP),
+    [width, posterColumns, gutter, isCompact]
   );
   const gridPosterHeight = Math.round(gridCardWidth * 1.5);
 
@@ -171,6 +180,7 @@ export default function DiscoverScreen() {
   const [homeLoading, setHomeLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const lastFetchedRef = useRef(0);
+  const homeRequestId = useRef(0);
 
   const uniqueList = useCallback((list: any[]) => {
     const seen = new Set();
@@ -184,6 +194,7 @@ export default function DiscoverScreen() {
   }, []);
 
   const fetchHomeData = useCallback(async (isSilent = false, forceRefresh = false) => {
+    const currentRequest = ++homeRequestId.current;
     try {
       if (!isSilent) {
         setHomeLoading(true);
@@ -227,10 +238,7 @@ export default function DiscoverScreen() {
       if (activeTab === 'all') {
         trendingPromise = Promise.all([
           tmdbService.getTrending('all', 'day', 1, forceRefresh),
-          tmdbService.getTrending('all', 'day', 2, forceRefresh),
-          tmdbService.getTrending('all', 'day', 3, forceRefresh),
-          tmdbService.getTrending('all', 'day', 4, forceRefresh),
-          tmdbService.getTrending('all', 'day', 5, forceRefresh),
+
         ]).then((pages) => {
           const merged = pages.flatMap((p) => p?.results || []);
           return { results: merged };
@@ -254,22 +262,19 @@ export default function DiscoverScreen() {
           return { results: merged };
         });
 
-        recsPromise = recommendationService.getPersonalizedRecommendations(120, undefined);
+        recsPromise = recommendationService.getPersonalizedRecommendations(36, undefined);
       } else {
         const mediaType: MediaType = activeTab === 'series' ? 'tv' : 'movie';
         trendingPromise = Promise.all([
           tmdbService.getTrending(mediaType, 'day', 1, forceRefresh),
-          tmdbService.getTrending(mediaType, 'day', 2, forceRefresh),
-          tmdbService.getTrending(mediaType, 'day', 3, forceRefresh),
-          tmdbService.getTrending(mediaType, 'day', 4, forceRefresh),
-          tmdbService.getTrending(mediaType, 'day', 5, forceRefresh),
+
         ]).then((pages) => {
           const merged = pages.flatMap((p) => p?.results || []);
           return { results: merged };
         });
         popularPromise = tmdbService.getPopular(mediaType, 1, forceRefresh);
         topRatedPromise = tmdbService.getTopRated(mediaType, 1, forceRefresh);
-        recsPromise = recommendationService.getPersonalizedRecommendations(120, mediaType);
+        recsPromise = recommendationService.getPersonalizedRecommendations(36, mediaType);
       }
 
       // Each rail publishes itself the moment its own data lands.
@@ -282,7 +287,7 @@ export default function DiscoverScreen() {
 
       const publish = <T,>(promise: Promise<T>, apply: (value: T) => void) => {
         railsSettled.push(
-          promise.then(apply).catch((err) => {
+          promise.then(value => { if (currentRequest === homeRequestId.current) { apply(value); const list = Array.isArray(value) ? value : (value as any)?.results; if (list?.length) setHomeLoading(false); } }).catch((err) => {
             // A rail that fails simply stays empty; it must not take the
             // others down with it.
             console.warn('[Home] Rail failed:', err);
@@ -324,15 +329,12 @@ export default function DiscoverScreen() {
 
       // The spinner clears as soon as the first rail has something to show,
       // rather than when the last one finishes.
-      await Promise.race(railsSettled);
-      setHomeLoading(false);
-
       await Promise.all(railsSettled);
-      lastFetchedRef.current = Date.now();
+      if (currentRequest === homeRequestId.current) lastFetchedRef.current = Date.now();
     } catch (err) {
       console.error('Home data fetch error:', err);
     } finally {
-      setHomeLoading(false);
+      if (currentRequest === homeRequestId.current) setHomeLoading(false);
     }
   }, [activeTab]);
 
@@ -366,6 +368,7 @@ export default function DiscoverScreen() {
   );
 
   useEffect(() => {
+    setTrending([]); setPopular([]); setTopRated([]); setRecommendations([]); setRecentlyWatched([]);
     fetchHomeData();
     triggerNotificationSync();
   }, [activeTab, fetchHomeData, triggerNotificationSync]);
@@ -402,60 +405,15 @@ export default function DiscoverScreen() {
 
       const existing = await getItem(tmdbId, mediaType);
 
+      const target = {...normalizeCard(longPressItem),mediaType};
       if (action === 'watchlist') {
-        if (existing?.status === 'watchlist') {
-          await deleteItem(existing.id);
-          await notificationService.cancelReminder(tmdbId, mediaType);
-        } else {
-          const status = 'watchlist';
-          await addItem({
-            tmdbId,
-            mediaType,
-            title: longPressItem.title,
-            posterPath: longPressItem.posterPath,
-            backdropPath: longPressItem.backdropPath,
-            overview: longPressItem.overview,
-            releaseDate: longPressItem.releaseDate,
-            genres: JSON.stringify(longPressItem.genreIds || []),
-            originalLanguage: longPressItem.originalLanguage,
-            runtime: 0,
-            voteAverage: longPressItem.voteAverage,
-            status,
-            watchedDate: null,
-          });
-
-          // Match the detail and upcoming screens: watchlisting an unreleased
-          // title also schedules its release reminders.
-          if (longPressItem.releaseDate && new Date(longPressItem.releaseDate) > new Date()) {
-            await notificationService.scheduleReleaseReminder(
-              longPressItem.title,
-              longPressItem.releaseDate,
-              tmdbId,
-              mediaType,
-              longPressItem.posterPath
-            );
-          }
-        }
+        const saved = await bookmarkTitle(target);
+        notice({message:saved?'Added to bookmarks':'Bookmark removed',undo:async()=>{await bookmarkTitle(target);}});
       } else if (action === 'not_interested') {
-        if (existing) {
-          await deleteItem(existing.id);
-          await notificationService.cancelReminder(tmdbId, mediaType);
-        }
-        await addItem({
-          tmdbId,
-          mediaType,
-          title: longPressItem.title,
-          posterPath: longPressItem.posterPath,
-          backdropPath: longPressItem.backdropPath,
-          overview: longPressItem.overview,
-          releaseDate: longPressItem.releaseDate,
-          genres: JSON.stringify(longPressItem.genreIds || []),
-          originalLanguage: longPressItem.originalLanguage,
-          runtime: 0,
-          voteAverage: longPressItem.voteAverage,
-          status: 'not_interested',
-          watchedDate: null,
-        });
+        const undo = existing ? await snapshotItem(existing) : async()=>{const added=await getItem(tmdbId,mediaType);if(added)await deleteItem(added.id);};
+        await addItem({tmdbId,mediaType,title:target.title,posterPath:target.posterPath,backdropPath:target.backdropPath,overview:target.overview,releaseDate:target.releaseDate,genres:JSON.stringify(target.genreIds),originalLanguage:target.originalLanguage,runtime:target.runtime??0,voteAverage:target.voteAverage,status:'not_interested',watchedDate:existing?.watchedDate??null});
+        await notificationService.cancelReminder(tmdbId,mediaType);
+        notice({message:'Hidden from recommendations',undo});
       }
 
       setLongPressItem(null);
@@ -831,7 +789,7 @@ export default function DiscoverScreen() {
           .join(' · ') || '';
 
       return (
-        <Card
+        <View><Card
           variant="filled"
           radius={shape.large}
           onPress={() => handleItemPress(item)}
@@ -930,7 +888,7 @@ export default function DiscoverScreen() {
               ) : null}
             </View>
           </View>
-        </Card>
+        </Card><QuickActions item={item} /></View>
       );
     },
     [handleItemPress, handleItemLongPress, colors, formatReleaseLabel]
@@ -943,7 +901,7 @@ export default function DiscoverScreen() {
       const year = item.releaseDate ? item.releaseDate.split('-')[0] : '—';
 
       return (
-        <Card
+        <View style={{width:gridCardWidth}}><Card
           variant="filled"
           radius={shape.medium}
           onPress={() => handleItemPress(item)}
@@ -1019,7 +977,7 @@ export default function DiscoverScreen() {
               </Text>
             ) : null}
           </View>
-        </Card>
+        </Card><QuickActions item={item} /></View>
       );
     },
     [handleItemPress, handleItemLongPress, colors, gridCardWidth, gridPosterHeight]
@@ -1314,6 +1272,9 @@ export default function DiscoverScreen() {
               contentContainerStyle={{ paddingBottom: listBottomPadding }}
             >
               {browseControls}
+              <TonightPicker />
+              <ContinueWatching />
+              <AvailableBookmarks />
 
               {homeLoading ? (
                 <Loading label="Loading your feed" style={styles.topSpaced} />
@@ -1324,12 +1285,12 @@ export default function DiscoverScreen() {
                     items={recommendations.slice(0, 15)}
                     onItemPress={handleItemPress}
                     onItemLongPress={handleItemLongPress}
-                    onSeeAll={() => setShowAllRecommendations(true)}
+                    onSeeAll={() => { setShowAllRecommendations(true); recommendationService.getPersonalizedRecommendations(120, activeTab === 'all' ? undefined : activeTab === 'movies' ? 'movie' : 'tv').then(setRecommendations).catch(console.warn); }}
                     cardSize="medium"
                     showMediaTypeBadge={activeTab === 'all'}
                   />
                   <CarouselSection
-                    title="Trending this week"
+                    title="Trending today"
                     items={trending}
                     onItemPress={handleItemPress}
                     onItemLongPress={handleItemLongPress}

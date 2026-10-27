@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { density, spacing } from '../../constants/m3';
 import { useTheme } from '../../context/ThemeContext';
 import Text from './Text';

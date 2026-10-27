@@ -1,3 +1,5 @@
+import { nextTimestamp } from './time';
+import { getSecret, setSecret, removeSecret } from './secrets';
 import * as SQLite from 'expo-sqlite';
 import type { SQLiteBindValue } from 'expo-sqlite';
 import type {
@@ -11,10 +13,13 @@ import { cloudSync } from './cloudSync';
 import type { CloudData } from './cloudSync';
 import { parseStoredGenres } from '../constants/genres';
 
+const dbListeners = new Set<() => void>();
+export const subscribeDatabase = (fn: () => void) => { dbListeners.add(fn); return () => { dbListeners.delete(fn); }; };
 export let dbChangeTimestamp = Date.now();
 
 export function notifyDbChanged() {
   dbChangeTimestamp = Date.now();
+  dbListeners.forEach(fn => fn());
 }
 
 // ─── Derived input / update types ───────────────────────────────────
@@ -97,6 +102,7 @@ export interface MatineeBackup {
   episodeRatings: EpisodeRating[];
   people: PersonEntry[];
   preferences: Record<string, string>;
+  activity?: import('./libraryActivity').ActivityRecord[];
 }
 
 export interface ImportSummary {
@@ -114,7 +120,7 @@ let initPromise: Promise<void> | null = null;
 
 const DB_NAME = 'matinee.db';
 const BACKUP_SCHEMA_VERSION = 1;
-const BACKUP_EXCLUDED_PREFERENCES = new Set(['API_KEY_STORAGE', '@matinee_api_key']);
+const BACKUP_EXCLUDED_PREFERENCES = new Set(['API_KEY_STORAGE', '@matinee_api_key', 'PREF_GEMINI_API_KEY', 'tmdbKey', 'geminiKey']);
 
 function getDb(): SQLite.SQLiteDatabase {
   if (!db) {
@@ -125,7 +131,7 @@ function getDb(): SQLite.SQLiteDatabase {
   return db;
 }
 
-async function getDbAsync(): Promise<SQLite.SQLiteDatabase> {
+export async function getDbAsync(): Promise<SQLite.SQLiteDatabase> {
   if (!db) {
     await initDatabase();
   }
@@ -248,6 +254,11 @@ export async function initDatabase(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_notifications_created   ON in_app_notifications(created_at);
     `);
 
+      await db.execAsync(`CREATE TABLE IF NOT EXISTS library_activity (
+        activity_key TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0
+      ); CREATE INDEX IF NOT EXISTS idx_activity_kind ON library_activity(kind, deleted);
+      CREATE TABLE IF NOT EXISTS sync_tombstones (entity_key TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);`);
+
       // Migration: Add certification column to watched_items if it doesn't exist (for existing installs)
       try {
         await db.execAsync('ALTER TABLE watched_items ADD COLUMN certification TEXT;');
@@ -298,7 +309,7 @@ export async function initDatabase(): Promise<void> {
 
       // Migration: Merge all 'interested' items into 'watchlist' status
       try {
-        await db.execAsync("UPDATE watched_items SET status = 'watchlist' WHERE status = 'interested';");
+        await db.execAsync("UPDATE watched_items SET status = 'watchlist' WHERE status = 'interested' AND NOT EXISTS (SELECT 1 FROM preferences WHERE key = 'MIGRATION_INTERESTED_V2'); INSERT OR IGNORE INTO preferences VALUES ('MIGRATION_INTERESTED_V2','done');");
       } catch (err) {
         console.error('Failed to merge interested status to watchlist:', err);
       }
@@ -551,12 +562,25 @@ export async function initDatabase(): Promise<void> {
       await db.execAsync(`
       UPDATE watched_items 
       SET status = 'watched'
-      WHERE status != 'watched' 
+      WHERE status IN ('watchlist','interested')
+        AND NOT EXISTS (SELECT 1 FROM preferences WHERE key = 'MIGRATION_RATINGS_WATCHED_V2')
         AND (
           id IN (SELECT item_id FROM ratings)
-          OR id IN (SELECT item_id FROM episode_ratings)
+
         );
     `);
+
+      await db.runAsync("INSERT OR IGNORE INTO preferences (key, value) VALUES ('MIGRATION_RATINGS_WATCHED_V2','done')");
+
+      // Earlier table rebuilds predate runtime metadata. Repair columns and indexes after every legacy migration.
+      for (const column of ['episode_count INTEGER','season_count INTEGER','total_runtime INTEGER']) {
+        try { await db.execAsync(`ALTER TABLE watched_items ADD COLUMN ${column}`); } catch {}
+      }
+      await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_watched_status ON watched_items(status);
+        CREATE INDEX IF NOT EXISTS idx_watched_media_type ON watched_items(media_type);
+        CREATE INDEX IF NOT EXISTS idx_watched_watched_date ON watched_items(watched_date);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ratings_item_unique ON ratings(item_id);
+        UPDATE watched_items SET total_runtime=runtime WHERE media_type='movie' AND total_runtime IS NULL AND runtime>0;`);
 
       // Data Migration: ensure all watched items have a valid watched_date
       await db.execAsync(`
@@ -565,6 +589,16 @@ export async function initDatabase(): Promise<void> {
       WHERE status = 'watched' 
         AND (watched_date IS NULL OR watched_date = '' OR watched_date = 'null');
     `);
+      // Preserve episode logs from older versions as watched progress once, then allow independent unchecking.
+      await db.execAsync(`INSERT OR IGNORE INTO library_activity (activity_key,kind,payload,updated_at,deleted)
+        SELECT 'episode:tv:'||w.tmdb_id||':'||e.season_number||':'||e.episode_number, 'episode',
+          json_object('tmdbId',w.tmdb_id,'mediaType','tv','season',e.season_number,'episode',e.episode_number,'runtime',COALESCE(w.runtime,0),'date',substr(e.created_at,1,10)),
+          strftime('%Y-%m-%dT%H:%M:%fZ','now'),0
+        FROM episode_ratings e JOIN watched_items w ON w.id=e.item_id
+        WHERE w.media_type='tv' AND NOT EXISTS (SELECT 1 FROM preferences WHERE key='MIGRATION_EPISODE_PROGRESS_V1');
+        INSERT OR IGNORE INTO preferences VALUES ('MIGRATION_EPISODE_PROGRESS_V1','done');`);
+      await getPreference('API_KEY_STORAGE');
+      await getPreference('PREF_GEMINI_API_KEY');
     } catch (error) {
       db = null;
       console.error('[Matinee DB] Initialisation failed:', error);
@@ -720,7 +754,7 @@ export async function addItem(item: NewWatchedItem): Promise<number> {
       const upgrades: WatchedItemUpdate = {
         status: item.status,
         watchedDate: item.watchedDate,
-        updatedAt: new Date().toISOString(),
+        updatedAt: nextTimestamp(),
       };
       if (!existing.runtime && item.runtime) upgrades.runtime = item.runtime;
       if (!existing.episodeCount && item.episodeCount) upgrades.episodeCount = item.episodeCount;
@@ -739,8 +773,8 @@ export async function addItem(item: NewWatchedItem): Promise<number> {
         (tmdb_id, media_type, title, poster_path, backdrop_path, overview,
          release_date, genres, original_language, runtime, episode_count,
          season_count, total_runtime, vote_average,
-         status, watched_date, certification)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         status, watched_date, certification, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         item.tmdbId,
         item.mediaType,
@@ -758,14 +792,14 @@ export async function addItem(item: NewWatchedItem): Promise<number> {
         item.voteAverage ?? null,
         item.status,
         item.watchedDate ?? null,
-        item.certification ?? null,
+        item.certification ?? null, nextTimestamp(), nextTimestamp(),
       ] as SQLiteBindValue[]
     );
 
     // ── Cloud sync (fire-and-forget) ──
     const saved = await getItem(item.tmdbId, item.mediaType);
     if (saved) {
-      cloudSync.pushItem(saved).catch(() => {});
+      await cloudSync.pushItem(saved);
     }
 
     notifyDbChanged();
@@ -816,7 +850,7 @@ export async function updateItem(
 
   if (setClauses.length === 0) return;
 
-  setClauses.push("updated_at = datetime('now')");
+  if (!('updatedAt' in updates)) { setClauses.push('updated_at = ?'); values.push(nextTimestamp()); }
   values.push(id);
 
   try {
@@ -831,7 +865,7 @@ export async function updateItem(
       [id]
     );
     if (row) {
-      cloudSync.pushItem(rowToWatchedItem(row)).catch(() => {});
+      await cloudSync.pushItem(rowToWatchedItem(row));
     }
     notifyDbChanged();
   } catch (error) {
@@ -844,17 +878,17 @@ export async function deleteItem(id: number): Promise<void> {
   const database = await getDbAsync();
   try {
     // Get tmdbId before deleting for cloud sync
-    const row = await database.getFirstAsync<{ tmdb_id: number }>(
-      'SELECT tmdb_id FROM watched_items WHERE id = ?',
+    const row = await database.getFirstAsync<{ tmdb_id: number; media_type: MediaType }>(
+      'SELECT tmdb_id, media_type FROM watched_items WHERE id = ?',
       [id]
     );
 
+    if (row) {
+      await database.runAsync('INSERT OR REPLACE INTO sync_tombstones (entity_key, deleted_at) VALUES (?, ?)', [`${row.media_type}:${row.tmdb_id}`, nextTimestamp()]);
+      await cloudSync.deleteItemCloud(row.tmdb_id, row.media_type);
+    }
     await database.runAsync('DELETE FROM watched_items WHERE id = ?', [id]);
 
-    // ── Cloud sync (fire-and-forget) ──
-    if (row) {
-      cloudSync.deleteItemCloud(row.tmdb_id).catch(() => {});
-    }
     notifyDbChanged();
   } catch (error) {
     console.error('[Matinee DB] deleteItem failed:', error);
@@ -983,8 +1017,8 @@ export async function addRating(rating: NewRating): Promise<number> {
     const result = await database.runAsync(
       `INSERT INTO ratings
         (item_id, overall_rating, plot_rating, acting_rating, visuals_rating,
-         soundtrack_rating, rewatchability, mood_emoji, review_text)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         soundtrack_rating, rewatchability, mood_emoji, review_text, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(item_id) DO UPDATE SET
          overall_rating    = excluded.overall_rating,
          plot_rating       = excluded.plot_rating,
@@ -993,7 +1027,8 @@ export async function addRating(rating: NewRating): Promise<number> {
          soundtrack_rating = excluded.soundtrack_rating,
          rewatchability    = excluded.rewatchability,
          mood_emoji        = excluded.mood_emoji,
-         review_text       = excluded.review_text`,
+         review_text       = excluded.review_text,
+         created_at        = excluded.created_at`,
       [
         rating.itemId,
         rating.overallRating,
@@ -1003,19 +1038,19 @@ export async function addRating(rating: NewRating): Promise<number> {
         rating.soundtrackRating ?? null,
         rating.rewatchability ?? null,
         rating.moodEmoji ?? null,
-        rating.reviewText ?? null,
+        rating.reviewText ?? null, nextTimestamp(),
       ] as SQLiteBindValue[]
     );
 
     // ── Cloud sync (fire-and-forget) ──
-    const itemRow = await database.getFirstAsync<{ tmdb_id: number }>(
-      'SELECT tmdb_id FROM watched_items WHERE id = ?',
+    const itemRow = await database.getFirstAsync<{ tmdb_id: number; media_type: MediaType }>(
+      'SELECT tmdb_id, media_type FROM watched_items WHERE id = ?',
       [rating.itemId]
     );
     if (itemRow) {
       const savedRating = await getRating(rating.itemId);
       if (savedRating) {
-        cloudSync.pushRating(itemRow.tmdb_id, savedRating).catch(() => {});
+        await cloudSync.pushRating(itemRow.tmdb_id, savedRating);
       }
     }
 
@@ -1070,6 +1105,8 @@ export async function updateRating(
 
   if (setClauses.length === 0) return;
 
+  setClauses.push('created_at = ?');
+  values.push(nextTimestamp());
   values.push(id);
 
   try {
@@ -1086,7 +1123,7 @@ export async function updateRating(
       [id]
     );
     if (ratingRow?.tmdb_id) {
-      cloudSync.pushRating(ratingRow.tmdb_id, rowToRating(ratingRow)).catch(() => {});
+      await cloudSync.pushRating(ratingRow.tmdb_id, rowToRating(ratingRow));
     }
     notifyDbChanged();
   } catch (error) {
@@ -1164,6 +1201,15 @@ export async function clearExpiredCache(): Promise<number> {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export async function getPreference(key: string): Promise<string | null> {
+  if (key === 'PREF_GEMINI_API_KEY' || key === 'API_KEY_STORAGE') {
+    const secretKey = key === 'API_KEY_STORAGE' ? '@matinee_api_key' : key;
+    const secret = await getSecret(secretKey);
+    const database = await getDbAsync();
+    const row = await database.getFirstAsync<{value:string}>('SELECT value FROM preferences WHERE key=?',[key]);
+    if (!secret && row?.value) await setSecret(secretKey,row.value);
+    await database.runAsync('DELETE FROM preferences WHERE key=?',[key]);
+    return secret ?? row?.value ?? null;
+  }
   const database = await getDbAsync();
   try {
     const row = await database.getFirstAsync<{ value: string }>(
@@ -1181,6 +1227,7 @@ export async function setPreference(
   key: string,
   value: string
 ): Promise<void> {
+  if (key === 'PREF_GEMINI_API_KEY' || key === 'API_KEY_STORAGE') { const secretKey = key === 'API_KEY_STORAGE' ? '@matinee_api_key' : key; if (value) await setSecret(secretKey,value); else await removeSecret(secretKey); notifyDbChanged(); return; }
   const database = await getDbAsync();
   try {
     await database.runAsync(
@@ -1189,7 +1236,7 @@ export async function setPreference(
     );
 
     // ── Cloud sync (fire-and-forget) ──
-    cloudSync.pushPreference(key, value).catch(() => {});
+    await cloudSync.pushPreference(key, value);
     notifyDbChanged();
   } catch (error) {
     console.error('[Matinee DB] setPreference failed:', error);
@@ -1246,7 +1293,7 @@ export async function exportUserData(): Promise<MatineeBackup> {
   return {
     app: 'Matinee',
     schemaVersion: BACKUP_SCHEMA_VERSION,
-    exportedAt: new Date().toISOString(),
+    exportedAt: nextTimestamp(),
     watchedItems: items.map(rowToWatchedItem),
     ratings: ratings.map(rowToRating),
     episodeRatings: episodeRatings.map(rowToEpisodeRating),
@@ -1258,6 +1305,7 @@ export async function exportUserData(): Promise<MatineeBackup> {
       profilePath: row.profile_path,
     })),
     preferences,
+    activity: await (await import('./libraryActivity')).readActivity(undefined, true),
   };
 }
 
@@ -1266,7 +1314,12 @@ export async function importUserData(rawBackup: unknown): Promise<ImportSummary>
     throw new Error('This is not a valid Matinee backup file.');
   }
 
+  for (const item of rawBackup.watchedItems) {
+    if (!Number.isInteger(item.id) || !Number.isInteger(item.tmdbId) || item.tmdbId < 1 || !['movie','tv'].includes(item.mediaType) || !['watched','watchlist','interested','not_interested'].includes(item.status) || typeof item.title !== 'string') throw new Error('The backup contains an invalid title. Nothing was restored.');
+  }
   const database = await getDbAsync();
+  let summary: ImportSummary | undefined;
+  await database.withTransactionAsync(async () => {
   const itemIdMap = new Map<number, number>();
 
   for (const item of rawBackup.watchedItems) {
@@ -1274,9 +1327,9 @@ export async function importUserData(rawBackup: unknown): Promise<ImportSummary>
       `INSERT INTO watched_items
         (tmdb_id, media_type, title, poster_path, backdrop_path, overview,
          release_date, genres, original_language, runtime, vote_average,
-         status, watched_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(tmdb_id) DO UPDATE SET
+         status, watched_date, created_at, updated_at, episode_count, season_count, total_runtime, certification)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tmdb_id, media_type) DO UPDATE SET
          media_type = excluded.media_type,
          title = excluded.title,
          poster_path = excluded.poster_path,
@@ -1290,7 +1343,9 @@ export async function importUserData(rawBackup: unknown): Promise<ImportSummary>
          status = excluded.status,
          watched_date = excluded.watched_date,
          created_at = excluded.created_at,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at,
+         episode_count = excluded.episode_count, season_count = excluded.season_count,
+         total_runtime = excluded.total_runtime, certification = excluded.certification`,
       [
         item.tmdbId,
         item.mediaType,
@@ -1306,13 +1361,13 @@ export async function importUserData(rawBackup: unknown): Promise<ImportSummary>
         item.status,
         item.watchedDate ?? null,
         item.createdAt,
-        item.updatedAt,
+        item.updatedAt, item.episodeCount ?? null, item.seasonCount ?? null, item.totalRuntime ?? null, item.certification ?? null,
       ] as SQLiteBindValue[]
     );
 
     const row = await database.getFirstAsync<{ id: number }>(
-      'SELECT id FROM watched_items WHERE tmdb_id = ?',
-      [item.tmdbId]
+      'SELECT id FROM watched_items WHERE tmdb_id = ? AND media_type = ?',
+      [item.tmdbId, item.mediaType]
     );
     if (row) itemIdMap.set(item.id, row.id);
   }
@@ -1391,18 +1446,24 @@ export async function importUserData(rawBackup: unknown): Promise<ImportSummary>
   let preferenceCount = 0;
   for (const [key, value] of Object.entries(rawBackup.preferences)) {
     if (!BACKUP_EXCLUDED_PREFERENCES.has(key)) {
-      await setPreference(key, value);
+      if (typeof value !== 'string') throw new Error('The backup contains an invalid preference.');
+      await database.runAsync('INSERT OR REPLACE INTO preferences (key,value) VALUES (?,?)', [key,value]);
       preferenceCount += 1;
     }
   }
 
-  return {
+  if (rawBackup.activity) await (await import('./libraryActivity')).mergeActivity(rawBackup.activity);
+  notifyDbChanged();
+  summary = {
     items: itemIdMap.size,
     ratings: ratingCount,
     episodeRatings: episodeRatingCount,
     people: peopleCount,
     preferences: preferenceCount,
   };
+  });
+  notifyDbChanged();
+  return summary!;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1430,12 +1491,12 @@ export async function saveDirectorsActors(
     }
 
     // ── Cloud sync (fire-and-forget) ──
-    const itemRow = await database.getFirstAsync<{ tmdb_id: number }>(
-      'SELECT tmdb_id FROM watched_items WHERE id = ?',
+    const itemRow = await database.getFirstAsync<{ tmdb_id: number; media_type: MediaType }>(
+      'SELECT tmdb_id, media_type FROM watched_items WHERE id = ?',
       [itemId]
     );
     if (itemRow) {
-      cloudSync.pushPeople(itemRow.tmdb_id, people).catch(() => {});
+      await cloudSync.pushPeople(itemRow.tmdb_id, people);
     }
   } catch (error) {
     console.error('[Matinee DB] saveDirectorsActors failed:', error);
@@ -1818,20 +1879,20 @@ export async function addEpisodeRating(rating: {
   try {
     const result = await database.runAsync(
       `INSERT OR REPLACE INTO episode_ratings
-        (item_id, season_number, episode_number, rating, review_text)
-       VALUES (?, ?, ?, ?, ?)`,
+        (item_id, season_number, episode_number, rating, review_text, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
       [
         rating.itemId,
         rating.seasonNumber,
         rating.episodeNumber,
         rating.rating,
-        rating.reviewText ?? null,
+        rating.reviewText ?? null, nextTimestamp(),
       ] as SQLiteBindValue[]
     );
 
     // ── Cloud sync (fire-and-forget) ──
-    const itemRow = await database.getFirstAsync<{ tmdb_id: number }>(
-      'SELECT tmdb_id FROM watched_items WHERE id = ?',
+    const itemRow = await database.getFirstAsync<{ tmdb_id: number; media_type: MediaType }>(
+      'SELECT tmdb_id, media_type FROM watched_items WHERE id = ?',
       [rating.itemId]
     );
     if (itemRow) {
@@ -1840,7 +1901,7 @@ export async function addEpisodeRating(rating: {
         [result.lastInsertRowId]
       );
       if (saved) {
-        cloudSync.pushEpisodeRating(itemRow.tmdb_id, rowToEpisodeRating(saved)).catch(() => {});
+        await cloudSync.pushEpisodeRating(itemRow.tmdb_id, rowToEpisodeRating(saved));
       }
     }
 
@@ -1881,11 +1942,11 @@ export async function deleteEpisodeRating(id: number): Promise<void> {
 
     // ── Cloud sync (fire-and-forget) ──
     if (epRow?.tmdb_id) {
-      cloudSync.deleteEpisodeRatingCloud(
+      await cloudSync.deleteEpisodeRatingCloud(
         epRow.tmdb_id,
         epRow.season_number,
         epRow.episode_number
-      ).catch(() => {});
+      );
     }
     notifyDbChanged();
   } catch (error) {
@@ -1904,154 +1965,83 @@ export async function deleteEpisodeRating(id: number): Promise<void> {
  */
 export async function mergeCloudData(data: CloudData): Promise<void> {
   const database = await getDbAsync();
-
-  // 1. Merge watched items
-  for (const [, itemData] of Object.entries(data.watchedItems)) {
-    const existing = await getItem(
-      itemData.tmdbId as number,
-      itemData.mediaType as MediaType | undefined
-    );
-    const cloudUpdated = itemData.updatedAt as string || '';
-
-    if (existing) {
-      // Cloud wins if it's newer
-      if (cloudUpdated > (existing.updatedAt || '')) {
-        await database.runAsync(
-          `UPDATE watched_items SET
-            media_type = ?, title = ?, poster_path = ?, backdrop_path = ?,
-            overview = ?, release_date = ?, genres = ?, original_language = ?,
-            runtime = ?, vote_average = ?, status = ?, watched_date = ?,
-            updated_at = ?, certification = ?
-           WHERE tmdb_id = ?`,
-          [
-            itemData.mediaType as string,
-            itemData.title as string,
-            (itemData.posterPath as string) ?? null,
-            (itemData.backdropPath as string) ?? null,
-            (itemData.overview as string) ?? null,
-            (itemData.releaseDate as string) ?? null,
-            (itemData.genres as string) ?? '[]',
-            (itemData.originalLanguage as string) ?? null,
-            (itemData.runtime as number) ?? 0,
-            (itemData.voteAverage as number) ?? 0,
-            itemData.status as string,
-            (itemData.watchedDate as string) ?? null,
-            cloudUpdated,
-            (itemData.certification as string) ?? null,
-            itemData.tmdbId as number,
-          ] as SQLiteBindValue[]
-        );
+  const { timestamp } = await import('./cloudSync');
+  const legacyItem = (id: number) => Object.values(data.watchedItems).find(r => r.tmdbId === id && !r.deleted);
+  const resolve = async (r: Record<string, any>, defaultType?: MediaType) => {
+    const type = r.mediaType ?? defaultType ?? legacyItem(r.tmdbId)?.mediaType;
+    // Never guess a movie's identity from a numeric ID that might be a series.
+    return type ? getItem(r.tmdbId, type) : null;
+  };
+  await database.withTransactionAsync(async () => {
+    for (const r of Object.values(data.watchedItems)) {
+      if (!Number.isInteger(r.tmdbId) || !['movie','tv'].includes(r.mediaType)) continue;
+      const key = `${r.mediaType}:${r.tmdbId}`;
+      const tombstone = await database.getFirstAsync<{deleted_at:string}>('SELECT deleted_at FROM sync_tombstones WHERE entity_key = ?', [key]);
+      const existing = await getItem(r.tmdbId, r.mediaType);
+      if (r.deleted) {
+        if (!existing || timestamp(r.updatedAt) >= timestamp(existing.updatedAt)) {
+          await database.runAsync('DELETE FROM watched_items WHERE tmdb_id = ? AND media_type = ?', [r.tmdbId,r.mediaType]);
+          await database.runAsync('INSERT OR REPLACE INTO sync_tombstones VALUES (?, ?)', [key,r.updatedAt]);
+        }
+        continue;
       }
-    } else {
-      // Item doesn't exist locally — insert it
-      await database.runAsync(
-        `INSERT INTO watched_items
-          (tmdb_id, media_type, title, poster_path, backdrop_path, overview,
-           release_date, genres, original_language, runtime, vote_average,
-           status, watched_date, created_at, updated_at, certification)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          itemData.tmdbId as number,
-          itemData.mediaType as string,
-          itemData.title as string,
-          (itemData.posterPath as string) ?? null,
-          (itemData.backdropPath as string) ?? null,
-          (itemData.overview as string) ?? null,
-          (itemData.releaseDate as string) ?? null,
-          (itemData.genres as string) ?? '[]',
-          (itemData.originalLanguage as string) ?? null,
-          (itemData.runtime as number) ?? 0,
-          (itemData.voteAverage as number) ?? 0,
-          itemData.status as string,
-          (itemData.watchedDate as string) ?? null,
-          (itemData.createdAt as string) ?? new Date().toISOString(),
-          cloudUpdated || new Date().toISOString(),
-          (itemData.certification as string) ?? null,
-        ] as SQLiteBindValue[]
-      );
+      // Another device may have missed the delete and only see the later re-add.
+      // Apply its history boundary even if this device has a newer parent edit.
+      if (r.historyResetAt && (!tombstone || timestamp(r.historyResetAt) > timestamp(tombstone.deleted_at))) {
+        await database.runAsync('INSERT INTO sync_tombstones VALUES (?,?) ON CONFLICT(entity_key) DO UPDATE SET deleted_at=excluded.deleted_at WHERE excluded.deleted_at > sync_tombstones.deleted_at',[key,r.historyResetAt]);
+        if (existing) {
+          await database.runAsync('DELETE FROM ratings WHERE item_id=? AND COALESCE(julianday(created_at),0)<=julianday(?)',[existing.id,r.historyResetAt]);
+          await database.runAsync('DELETE FROM episode_ratings WHERE item_id=? AND COALESCE(julianday(created_at),0)<=julianday(?)',[existing.id,r.historyResetAt]);
+          await database.runAsync('DELETE FROM director_actor_cache WHERE item_id=?',[existing.id]);
+        }
+      }
+      if (tombstone && timestamp(tombstone.deleted_at) >= timestamp(r.updatedAt)) continue;
+      if (existing && timestamp(existing.updatedAt) >= timestamp(r.updatedAt)) continue;
+      if (!['watched','watchlist','interested','not_interested'].includes(r.status)) continue;
+      await database.runAsync(`INSERT INTO watched_items
+        (tmdb_id,media_type,title,poster_path,backdrop_path,overview,release_date,genres,original_language,runtime,vote_average,status,watched_date,created_at,updated_at,certification,episode_count,season_count,total_runtime)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tmdb_id,media_type) DO UPDATE SET
+        title=excluded.title,poster_path=excluded.poster_path,backdrop_path=excluded.backdrop_path,overview=excluded.overview,
+        release_date=excluded.release_date,genres=excluded.genres,original_language=excluded.original_language,runtime=excluded.runtime,
+        vote_average=excluded.vote_average,status=excluded.status,watched_date=excluded.watched_date,updated_at=excluded.updated_at,
+        certification=excluded.certification,episode_count=COALESCE(excluded.episode_count,watched_items.episode_count),
+        season_count=COALESCE(excluded.season_count,watched_items.season_count),total_runtime=COALESCE(excluded.total_runtime,watched_items.total_runtime)`,
+        [r.tmdbId,r.mediaType,r.title,r.posterPath??null,r.backdropPath??null,r.overview??'',r.releaseDate??'',r.genres??'[]',r.originalLanguage??'',r.runtime??0,r.voteAverage??0,r.status,r.watchedDate??null,r.createdAt??r.updatedAt,r.updatedAt??nextTimestamp(),r.certification??null,r.episodeCount??null,r.seasonCount??null,r.totalRuntime??null]);
+      if (r.historyResetAt) await database.runAsync('INSERT INTO sync_tombstones VALUES (?,?) ON CONFLICT(entity_key) DO UPDATE SET deleted_at=excluded.deleted_at WHERE excluded.deleted_at > sync_tombstones.deleted_at',[key,r.historyResetAt]);
     }
-  }
-
-  // 2. Merge ratings
-  for (const [tmdbIdStr, ratingData] of Object.entries(data.ratings)) {
-    const tmdbId = parseInt(tmdbIdStr, 10);
-    const localItem = await getItem(tmdbId);
-    if (!localItem) continue;
-
-    // Delete existing rating and insert the cloud one
-    await database.runAsync('DELETE FROM ratings WHERE item_id = ?', [localItem.id]);
-    await database.runAsync(
-      `INSERT INTO ratings
-        (item_id, overall_rating, plot_rating, acting_rating, visuals_rating,
-         soundtrack_rating, rewatchability, mood_emoji, review_text, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        localItem.id,
-        (ratingData.overallRating as number) ?? 0,
-        (ratingData.plotRating as number) ?? null,
-        (ratingData.actingRating as number) ?? null,
-        (ratingData.visualsRating as number) ?? null,
-        (ratingData.soundtrackRating as number) ?? null,
-        (ratingData.rewatchability as number) ?? null,
-        (ratingData.moodEmoji as string) ?? null,
-        (ratingData.reviewText as string) ?? null,
-        (ratingData.createdAt as string) ?? new Date().toISOString(),
-      ] as SQLiteBindValue[]
-    );
-  }
-
-  // 3. Merge episode ratings
-  for (const [, epData] of Object.entries(data.episodeRatings)) {
-    const tmdbId = epData.tmdbId as number;
-    const localItem = await getItem(tmdbId);
-    if (!localItem) continue;
-
-    await database.runAsync(
-      `INSERT OR REPLACE INTO episode_ratings
-        (item_id, season_number, episode_number, rating, review_text, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        localItem.id,
-        epData.seasonNumber as number,
-        epData.episodeNumber as number,
-        epData.rating as number,
-        (epData.reviewText as string) ?? null,
-        (epData.createdAt as string) ?? new Date().toISOString(),
-      ] as SQLiteBindValue[]
-    );
-  }
-
-  // 4. Merge people
-  for (const [, personData] of Object.entries(data.people)) {
-    const tmdbId = personData.tmdbId as number;
-    const localItem = await getItem(tmdbId);
-    if (!localItem) continue;
-
-    await database.runAsync(
-      `INSERT OR IGNORE INTO director_actor_cache
-        (item_id, person_id, person_name, role, profile_path)
-       VALUES (?, ?, ?, ?, ?)`,
-      [
-        localItem.id,
-        personData.personId as number,
-        personData.personName as string,
-        personData.role as string,
-        (personData.profilePath as string) ?? null,
-      ] as SQLiteBindValue[]
-    );
-  }
-
-  // 5. Merge preferences (cloud wins)
-  const EXCLUDED = new Set(['API_KEY_STORAGE', '@matinee_api_key']);
-  for (const [key, value] of Object.entries(data.preferences)) {
-    if (EXCLUDED.has(key)) continue;
-    await database.runAsync(
-      'INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)',
-      [key, value]
-    );
-  }
-
-  console.log('[Matinee DB] Cloud data merged into local database.');
+    const childIsCurrent = async (item: WatchedItem, record: Record<string,any>) => {
+      const boundary = await database.getFirstAsync<{deleted_at:string}>('SELECT deleted_at FROM sync_tombstones WHERE entity_key=?',[`${item.mediaType}:${item.tmdbId}`]);
+      return !boundary || timestamp(record.updatedAt ?? record.createdAt) > timestamp(boundary.deleted_at);
+    };
+    for (const [key,r] of Object.entries(data.ratings)) {
+      const id = r.tmdbId ?? Number(key.split(':').pop());
+      const item = await resolve({...r,tmdbId:id}); if (!item || !(await childIsCurrent(item,r))) continue;
+      const local = await getRating(item.id);
+      if (local && timestamp(local.createdAt) >= timestamp(r.updatedAt ?? r.createdAt)) continue;
+      await database.runAsync(`INSERT INTO ratings (item_id,overall_rating,plot_rating,acting_rating,visuals_rating,soundtrack_rating,rewatchability,mood_emoji,review_text,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(item_id) DO UPDATE SET overall_rating=excluded.overall_rating,plot_rating=excluded.plot_rating,
+        acting_rating=excluded.acting_rating,visuals_rating=excluded.visuals_rating,soundtrack_rating=excluded.soundtrack_rating,rewatchability=excluded.rewatchability,
+        mood_emoji=excluded.mood_emoji,review_text=excluded.review_text,created_at=excluded.created_at`,
+        [item.id,r.overallRating,r.plotRating??null,r.actingRating??null,r.visualsRating??null,r.soundtrackRating??null,r.rewatchability??null,r.moodEmoji??null,r.reviewText??null,r.updatedAt??r.createdAt]);
+    }
+    for (const r of Object.values(data.episodeRatings)) {
+      const item = await resolve(r, 'tv'); if (!item || !(await childIsCurrent(item,r))) continue;
+      const local = await database.getFirstAsync<{created_at:string}>('SELECT created_at FROM episode_ratings WHERE item_id=? AND season_number=? AND episode_number=?',[item.id,r.seasonNumber,r.episodeNumber]);
+      if (local && timestamp(local.created_at) > timestamp(r.updatedAt??r.createdAt)) continue;
+      if (r.deleted) await database.runAsync('DELETE FROM episode_ratings WHERE item_id=? AND season_number=? AND episode_number=?',[item.id,r.seasonNumber,r.episodeNumber]);
+      else await database.runAsync('INSERT OR REPLACE INTO episode_ratings (item_id,season_number,episode_number,rating,review_text,created_at) VALUES (?,?,?,?,?,?)',[item.id,r.seasonNumber,r.episodeNumber,r.rating,r.reviewText??null,r.updatedAt??r.createdAt]);
+    }
+    for (const r of Object.values(data.people)) {
+      const item = await resolve(r); if (!item || !(await childIsCurrent(item,r))) continue;
+      await database.runAsync('INSERT OR REPLACE INTO director_actor_cache (item_id,person_id,person_name,role,profile_path) VALUES (?,?,?,?,?)',[item.id,r.personId,r.personName,r.role,r.profilePath??null]);
+    }
+    for (const [key,value] of Object.entries(data.preferences)) {
+      if (BACKUP_EXCLUDED_PREFERENCES.has(key)) continue;
+      // Device preferences are authoritative once chosen; new devices inherit cloud defaults.
+      await database.runAsync('INSERT OR IGNORE INTO preferences (key,value) VALUES (?,?)',[key,value]);
+    }
+    if (data.activity) await (await import('./libraryActivity')).mergeActivity(Object.values(data.activity));
+  });
   notifyDbChanged();
 }
 
@@ -2069,6 +2059,8 @@ export async function clearAllData(): Promise<void> {
       DELETE FROM watched_items;
       DELETE FROM preferences;
       DELETE FROM tmdb_cache;
+      DELETE FROM library_activity;
+      DELETE FROM sync_tombstones;
     `);
     console.log('[Matinee DB] All local data cleared.');
     notifyDbChanged();
@@ -2197,7 +2189,9 @@ export async function getLibraryVersion(): Promise<string> {
     const row = await database.getFirstAsync<{ total: number; latest: string | null }>(
       `SELECT COUNT(*) AS total, MAX(updated_at) AS latest FROM watched_items`
     );
-    return `${row?.total ?? 0}@${row?.latest ?? 'none'}`;
+    const prefs = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM preferences WHERE key IN ('PREF_LANGUAGES', 'PREF_USER_COUNTRY', 'PREF_OTT_PROVIDERS', 'PREF_ADULT_CONTENT', 'PREF_ADVENTURE') ORDER BY key");
+    const feedback = await database.getFirstAsync<{ latest: string }>("SELECT MAX(updated_at) AS latest FROM library_activity WHERE kind = 'feedback'");
+    return `${row?.total ?? 0}@${row?.latest ?? 'none'}:${JSON.stringify(prefs)}:${feedback?.latest ?? ''}`;
   } catch (error) {
     console.error('[Matinee DB] getLibraryVersion failed:', error);
     // A unique value degrades to "never cached", which is the safe direction.

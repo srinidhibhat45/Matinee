@@ -7,7 +7,7 @@ import {
   type TextInputProps,
   type ViewStyle,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { density, shape, spacing, typescale, MIN_TOUCH_TARGET } from '../../constants/m3';
 import { useTheme } from '../../context/ThemeContext';
 import Text from './Text';

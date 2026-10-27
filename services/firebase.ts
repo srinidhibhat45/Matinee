@@ -38,11 +38,11 @@ const FIREBASE_CONFIG = {
 };
 
 // Initialize Firebase
-const app = initializeApp(FIREBASE_CONFIG);
+const app = getApps().length ? getApp() : initializeApp(FIREBASE_CONFIG);
 
 // Initialize analytics safely (web only, as JS analytics crashes on native)
 let analytics: any = null;
-if (Platform.OS === 'web') {
+if (Platform.OS === 'web' && typeof window !== 'undefined') {
   try {
     analytics = getAnalytics(app);
   } catch (err) {
@@ -90,23 +90,6 @@ export function getFirebaseApp(): FirebaseApp {
  * Get the Firestore database instance.
  * Initialises Firebase if not already done.
  */
-// Clear legacy local storage keys that might exceed browser quota
-if (Platform.OS === 'web') {
-  try {
-    const keysToRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && (key.startsWith('firestore_') || key.includes('firebase'))) {
-        keysToRemove.push(key);
-      }
-    }
-    keysToRemove.forEach((k) => localStorage.removeItem(k));
-    console.log('[Firebase] Successfully cleared old Firestore LocalStorage keys.');
-  } catch (err) {
-    console.warn('[Firebase] Failed to clear localStorage keys:', err);
-  }
-}
-
 /**
  * Get the Firestore database instance.
  * Initialises Firebase if not already done.
@@ -119,11 +102,7 @@ export function getFirestoreDb(): Firestore {
   // Use memory cache for web to avoid LocalStorage 5MB quota errors
   try {
     firestoreDb = initializeFirestore(app, {
-      localCache: Platform.OS === 'web'
-        ? memoryLocalCache()
-        : persistentLocalCache({
-            tabManager: persistentMultipleTabManager(),
-          }),
+      localCache: memoryLocalCache(),
     });
   } catch {
     // If initializeFirestore was already called, fall back to getFirestore

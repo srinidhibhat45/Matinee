@@ -1,514 +1,359 @@
-// ─── Cloud Sync Service ─────────────────────────────────────────────
-// Mirrors local SQLite data to Firebase Firestore, keyed by a SHA-256
-// hash of the user's TMDB API key.  All methods are fire-and-forget so
-// they never block the UI.  Errors are logged, never thrown to callers.
-
-import {
-  collection,
-  doc,
-  setDoc,
-  getDoc,
-  getDocs,
-  deleteDoc,
-  writeBatch,
-  serverTimestamp,
-  type Firestore,
-  type DocumentData,
-} from 'firebase/firestore';
+import { nextTimestamp } from './time';
+import { Platform } from 'react-native';
+/** Local writes are queued durably before network work. API keys are never synced. */
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { collection, doc, getDoc, getDocs, setDoc, deleteDoc, runTransaction, writeBatch, type DocumentData } from 'firebase/firestore';
+import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, initializeAuth } from 'firebase/auth';
+import { getFirebaseApp, getFirestoreDb, isFirebaseConfigured } from './firebase';
 import * as Crypto from 'expo-crypto';
-import { getFirestoreDb, isFirebaseConfigured } from './firebase';
-import type {
-  WatchedItem,
-  Rating,
-  EpisodeRating,
-  MediaType,
-  ItemStatus,
-} from '../types';
+import type { WatchedItem, Rating, EpisodeRating, MediaType } from '../types';
 import type { PersonEntry } from './database';
-
-// ── State ───────────────────────────────────────────────────────────
-
-let userDocPath: string | null = null;
-let firestoreDb: Firestore | null = null;
-let _lastSyncTime: string | null = null;
-let _isSyncing = false;
-
-// ── Helpers ─────────────────────────────────────────────────────────
-
-async function hashApiKey(apiKey: string): Promise<string> {
-  const digest = await Crypto.digestStringAsync(
-    Crypto.CryptoDigestAlgorithm.SHA256,
-    apiKey.trim()
-  );
-  return digest;
-}
-
-function getDb(): Firestore | null {
-  if (firestoreDb) return firestoreDb;
-  if (!isFirebaseConfigured()) return null;
-  try {
-    firestoreDb = getFirestoreDb();
-    return firestoreDb;
-  } catch (err) {
-    console.warn('[CloudSync] Firestore not available:', err);
-    return null;
-  }
-}
-
-function getUserPath(): string | null {
-  return userDocPath;
-}
-
-function isReady(): boolean {
-  return !!getUserPath() && !!getDb();
-}
-
-// ── Initialisation ──────────────────────────────────────────────────
-
-/**
- * Initialise cloud sync by computing the user's document path from
- * the SHA-256 hash of their TMDB API key.
- */
-async function initCloudSync(apiKey: string | null): Promise<boolean> {
-  if (!apiKey?.trim()) {
-    console.log('[CloudSync] No API key provided — cloud sync disabled.');
-    userDocPath = null;
-    return false;
-  }
-
-  if (!isFirebaseConfigured()) {
-    console.log('[CloudSync] Firebase not configured — cloud sync disabled.');
-    return false;
-  }
-
-  try {
-    const hash = await hashApiKey(apiKey);
-    userDocPath = hash;
-    getDb(); // eagerly init Firestore
-    console.log('[CloudSync] Initialised with user path:', hash.substring(0, 8) + '…');
-    return true;
-  } catch (err) {
-    console.error('[CloudSync] Init failed:', err);
-    userDocPath = null;
-    return false;
-  }
-}
-
-// ── Push Operations (Local → Cloud) ─────────────────────────────────
-
-/**
- * Push a watched item to Firestore.
- * Uses tmdbId as the document ID for cross-device portability.
- */
-async function pushItem(item: WatchedItem): Promise<void> {
-  if (!isReady()) return;
-  try {
-    const db = getDb()!;
-    const ref = doc(db, 'matinee_users', userDocPath!, 'watched_items', String(item.tmdbId));
-    await setDoc(ref, {
-      tmdbId: item.tmdbId,
-      mediaType: item.mediaType,
-      title: item.title,
-      posterPath: item.posterPath ?? null,
-      backdropPath: item.backdropPath ?? null,
-      overview: item.overview ?? '',
-      releaseDate: item.releaseDate ?? null,
-      genres: item.genres ?? '[]',
-      originalLanguage: item.originalLanguage ?? null,
-      runtime: item.runtime ?? 0,
-      voteAverage: item.voteAverage ?? 0,
-      status: item.status,
-      watchedDate: item.watchedDate ?? null,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt ?? new Date().toISOString(),
-      certification: item.certification ?? null,
-      _syncedAt: serverTimestamp(),
-    }, { merge: true });
-  } catch (err) {
-    console.warn('[CloudSync] pushItem failed:', err);
-  }
-}
-
-/**
- * Push a rating to Firestore.  Document ID = tmdbId of the rated item.
- */
-async function pushRating(tmdbId: number, rating: Rating): Promise<void> {
-  if (!isReady()) return;
-  try {
-    const db = getDb()!;
-    const ref = doc(db, 'matinee_users', userDocPath!, 'ratings', String(tmdbId));
-    await setDoc(ref, {
-      tmdbId,
-      overallRating: rating.overallRating,
-      plotRating: rating.plotRating ?? null,
-      actingRating: rating.actingRating ?? null,
-      visualsRating: rating.visualsRating ?? null,
-      soundtrackRating: rating.soundtrackRating ?? null,
-      rewatchability: rating.rewatchability ?? null,
-      moodEmoji: rating.moodEmoji ?? null,
-      reviewText: rating.reviewText ?? null,
-      createdAt: rating.createdAt,
-      _syncedAt: serverTimestamp(),
-    }, { merge: true });
-  } catch (err) {
-    console.warn('[CloudSync] pushRating failed:', err);
-  }
-}
-
-/**
- * Push an episode rating to Firestore.
- */
-async function pushEpisodeRating(
-  tmdbId: number,
-  epRating: EpisodeRating
-): Promise<void> {
-  if (!isReady()) return;
-  try {
-    const db = getDb()!;
-    const docId = `${tmdbId}_s${epRating.seasonNumber}_e${epRating.episodeNumber}`;
-    const ref = doc(db, 'matinee_users', userDocPath!, 'episode_ratings', docId);
-    await setDoc(ref, {
-      tmdbId,
-      seasonNumber: epRating.seasonNumber,
-      episodeNumber: epRating.episodeNumber,
-      rating: epRating.rating,
-      reviewText: epRating.reviewText ?? null,
-      createdAt: epRating.createdAt,
-      _syncedAt: serverTimestamp(),
-    }, { merge: true });
-  } catch (err) {
-    console.warn('[CloudSync] pushEpisodeRating failed:', err);
-  }
-}
-
-/**
- * Push director/actor associations for an item.
- */
-async function pushPeople(
-  tmdbId: number,
-  people: PersonEntry[]
-): Promise<void> {
-  if (!isReady() || people.length === 0) return;
-  try {
-    const db = getDb()!;
-    const batch = writeBatch(db);
-
-    for (const person of people) {
-      const docId = `${tmdbId}_${person.personId}_${person.role}`;
-      const ref = doc(db, 'matinee_users', userDocPath!, 'people', docId);
-      batch.set(ref, {
-        tmdbId,
-        personId: person.personId,
-        personName: person.personName,
-        role: person.role,
-        profilePath: person.profilePath ?? null,
-        _syncedAt: serverTimestamp(),
-      });
-    }
-
-    await batch.commit();
-  } catch (err) {
-    console.warn('[CloudSync] pushPeople failed:', err);
-  }
-}
-
-/**
- * Push a single preference to Firestore.
- * All preferences are stored in a single document.
- */
-async function pushPreference(key: string, value: string): Promise<void> {
-  if (!isReady()) return;
-  // Don't sync API key or sensitive data
-  const EXCLUDED = new Set(['API_KEY_STORAGE', '@matinee_api_key']);
-  if (EXCLUDED.has(key)) return;
-
-  try {
-    const db = getDb()!;
-    const ref = doc(db, 'matinee_users', userDocPath!, 'meta', 'preferences');
-    await setDoc(ref, { [key]: value, _syncedAt: serverTimestamp() }, { merge: true });
-  } catch (err) {
-    console.warn('[CloudSync] pushPreference failed:', err);
-  }
-}
-
-/**
- * Delete a watched item and its associated data from the cloud.
- */
-async function deleteItemCloud(tmdbId: number): Promise<void> {
-  if (!isReady()) return;
-  try {
-    const db = getDb()!;
-
-    // Delete the watched item document
-    await deleteDoc(doc(db, 'matinee_users', userDocPath!, 'watched_items', String(tmdbId)));
-
-    // Delete associated rating
-    await deleteDoc(doc(db, 'matinee_users', userDocPath!, 'ratings', String(tmdbId)));
-
-    // Delete associated episode ratings — we need to query and delete
-    const epSnap = await getDocs(
-      collection(db, 'matinee_users', userDocPath!, 'episode_ratings')
-    );
-    const batch = writeBatch(db);
-    let batchCount = 0;
-    epSnap.forEach((epDoc) => {
-      if (epDoc.id.startsWith(`${tmdbId}_`)) {
-        batch.delete(epDoc.ref);
-        batchCount++;
-      }
-    });
-    if (batchCount > 0) await batch.commit();
-
-    // Delete associated people
-    const peopleSnap = await getDocs(
-      collection(db, 'matinee_users', userDocPath!, 'people')
-    );
-    const peopleBatch = writeBatch(db);
-    let peopleBatchCount = 0;
-    peopleSnap.forEach((pDoc) => {
-      if (pDoc.id.startsWith(`${tmdbId}_`)) {
-        peopleBatch.delete(pDoc.ref);
-        peopleBatchCount++;
-      }
-    });
-    if (peopleBatchCount > 0) await peopleBatch.commit();
-  } catch (err) {
-    console.warn('[CloudSync] deleteItemCloud failed:', err);
-  }
-}
-
-/**
- * Delete an episode rating from the cloud.
- */
-async function deleteEpisodeRatingCloud(
-  tmdbId: number,
-  seasonNumber: number,
-  episodeNumber: number
-): Promise<void> {
-  if (!isReady()) return;
-  try {
-    const db = getDb()!;
-    const docId = `${tmdbId}_s${seasonNumber}_e${episodeNumber}`;
-    await deleteDoc(doc(db, 'matinee_users', userDocPath!, 'episode_ratings', docId));
-  } catch (err) {
-    console.warn('[CloudSync] deleteEpisodeRatingCloud failed:', err);
-  }
-}
-
-// ── Pull Operations (Cloud → Local) ─────────────────────────────────
-
-interface CloudData {
+import type { ActivityRecord } from './libraryActivity';
+export interface CloudData {
   watchedItems: Record<string, DocumentData>;
   ratings: Record<string, DocumentData>;
   episodeRatings: Record<string, DocumentData>;
   people: Record<string, DocumentData>;
   preferences: Record<string, string>;
+  activity?: Record<string, ActivityRecord>;
 }
-
-/**
- * Pull all user data from Firestore.
- */
-async function pullAllData(): Promise<CloudData | null> {
-  if (!isReady()) return null;
-
-  try {
-    const db = getDb()!;
-    const basePath = `matinee_users/${userDocPath!}`;
-
-    const [itemsSnap, ratingsSnap, epSnap, peopleSnap, prefsDoc] =
-      await Promise.all([
-        getDocs(collection(db, basePath, 'watched_items')),
-        getDocs(collection(db, basePath, 'ratings')),
-        getDocs(collection(db, basePath, 'episode_ratings')),
-        getDocs(collection(db, basePath, 'people')),
-        getDoc(doc(db, basePath, 'meta', 'preferences')),
-      ]);
-
-    const watchedItems: Record<string, DocumentData> = {};
-    itemsSnap.forEach((d) => {
-      watchedItems[d.id] = d.data();
-    });
-
-    const ratings: Record<string, DocumentData> = {};
-    ratingsSnap.forEach((d) => {
-      ratings[d.id] = d.data();
-    });
-
-    const episodeRatings: Record<string, DocumentData> = {};
-    epSnap.forEach((d) => {
-      episodeRatings[d.id] = d.data();
-    });
-
-    const people: Record<string, DocumentData> = {};
-    peopleSnap.forEach((d) => {
-      people[d.id] = d.data();
-    });
-
-    const preferences: Record<string, string> = {};
-    if (prefsDoc.exists()) {
-      const data = prefsDoc.data();
-      for (const [k, v] of Object.entries(data)) {
-        if (k !== '_syncedAt' && typeof v === 'string') {
-          preferences[k] = v;
-        }
+interface Pending {
+  owner: string;
+  bucket: string;
+  id: string;
+  data: DocumentData;
+  revision: string;
+}
+const QUEUE_KEY = '@matinee_sync_queue_v2';
+const EXCLUDED = new Set(['API_KEY_STORAGE', '@matinee_api_key', 'PREF_GEMINI_API_KEY', 'tmdbKey', 'geminiKey']);
+let owner: string | null = null;
+let legacyOwner: string | null = null;
+let lastSync: string | null = null;
+let syncing = false;
+let flushPromise: Promise<void> | null = null;
+let queueLock: Promise<unknown> = Promise.resolve();
+let lastError: string | null = null;
+let authInstance: ReturnType<typeof getAuth> | null = null;
+const identity = (id: number, type: MediaType = 'movie') => `${type}:${id}`;
+export function timestamp(value: unknown): number {
+  const raw = String(value ?? '').replace(' ', 'T');
+  const n = Date.parse(raw && !/Z$|[+-]\d{2}:\d{2}$/.test(raw) ? `${raw}Z` : raw);
+  return Number.isFinite(n) ? n : 0;
+}
+function auth() {
+  if (!authInstance) {
+    if (Platform.OS !== 'web') {
+      try {
+        authInstance = initializeAuth(getFirebaseApp(), {
+          persistence: require('firebase/auth').getReactNativePersistence(AsyncStorage)
+        });
+      } catch {
+        authInstance = getAuth(getFirebaseApp());
       }
+    } else authInstance = getAuth(getFirebaseApp());
+  }
+  return authInstance;
+}
+async function readQueue(): Promise<Pending[]> {
+  const raw = await AsyncStorage.getItem(QUEUE_KEY);
+  return raw ? JSON.parse(raw) : [];
+}
+function mutateQueue(fn: (q: Pending[]) => Pending[]): Promise<void> {
+  const result = queueLock.then(async () => {
+    const next = fn(await readQueue());
+    await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(next));
+  });
+  queueLock = result.catch(() => {});
+  return result;
+}
+async function bounded<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([work, new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Cloud is unavailable. Changes are saved on this device and will retry.')), 12000);
+  })]).finally(() => clearTimeout(timer));
+}
+async function enqueue(bucket: string, id: string, data: DocumentData): Promise<void> {
+  const entry: Pending = {
+    owner: owner ?? 'local',
+    bucket,
+    id,
+    data: JSON.parse(JSON.stringify(data)),
+    revision: `${Date.now()}-${Math.random()}`
+  };
+  await mutateQueue(q => [...q.filter(p => !(p.owner === entry.owner && p.bucket === bucket && p.id === id)), entry]);
+  if (owner && !syncing) void flushQueue().catch(() => {});
+}
+async function flushQueue(): Promise<void> {
+  if (flushPromise) return flushPromise;
+  if (!owner) return;
+  const currentOwner = owner;
+  flushPromise = (async () => {
+    await queueLock;
+    let pending = (await readQueue()).filter(p => p.owner === currentOwner || p.owner === 'local');
+    while (pending.length && owner === currentOwner) {
+      for (const p of pending) {
+        if (owner !== currentOwner) break;
+        const ref = doc(getFirestoreDb(), 'matinee_users', currentOwner, p.bucket, p.id);
+        await bounded(runTransaction(getFirestoreDb(), async tx => {
+          const remote = await tx.get(ref);
+          if (!remote.exists() || timestamp(p.data.updatedAt) >= timestamp(remote.data().updatedAt)) tx.set(ref, p.data);
+        }));
+        await mutateQueue(q => q.filter(x => x.revision !== p.revision));
+      }
+      await queueLock;
+      pending = (await readQueue()).filter(p => p.owner === currentOwner || p.owner === 'local');
     }
-
-    return { watchedItems, ratings, episodeRatings, people, preferences };
-  } catch (err) {
-    console.error('[CloudSync] pullAllData failed:', err);
-    return null;
+    lastError = null;
+  })().catch(e => {
+    lastError = e.message;
+    throw e;
+  }).finally(() => {
+    flushPromise = null;
+  });
+  return flushPromise;
+}
+async function initCloudSync(apiKey: string | null): Promise<boolean> {
+  if (!isFirebaseConfigured()) return false;
+  await auth().authStateReady();
+  legacyOwner = apiKey?.trim() ? await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, apiKey.trim()) : null;
+  owner = auth().currentUser?.uid ?? ((await AsyncStorage.getItem('@matinee_sync_account_mode')) === 'true' ? null : legacyOwner);
+  return !!owner;
+}
+async function connectAccount(email: string, password: string, create = false): Promise<void> {
+  // Preserve the current library locally; the next sync migrates its records to the authenticated namespace.
+  if (!email.trim() || password.length < 6) throw new Error('Enter your email and a password of at least 6 characters.');
+  await bounded(create ? createUserWithEmailAndPassword(auth(), email.trim(), password) : signInWithEmailAndPassword(auth(), email.trim(), password));
+  owner = auth().currentUser!.uid;
+  await AsyncStorage.setItem('@matinee_sync_account_mode', 'true');
+}
+async function disconnectAccount(): Promise<void> {
+  await signOut(auth());
+  owner = null;
+}
+async function pushItem(item: WatchedItem): Promise<void> {
+  const {
+    getDbAsync
+  } = await import('./database');
+  const boundary = await (await getDbAsync()).getFirstAsync<{
+    deleted_at: string;
+  }>('SELECT deleted_at FROM sync_tombstones WHERE entity_key=?', [identity(item.tmdbId, item.mediaType)]);
+  await enqueue('watched_items', identity(item.tmdbId, item.mediaType), {
+    ...item,
+    id: undefined,
+    userRating: undefined,
+    deleted: false,
+    historyResetAt: boundary?.deleted_at ?? null,
+    updatedAt: item.updatedAt || nextTimestamp()
+  });
+}
+async function resolveType(tmdbId: number, localId: number): Promise<MediaType> {
+  const {
+    getDbAsync
+  } = await import('./database');
+  const row = await (await getDbAsync()).getFirstAsync<{
+    media_type: MediaType;
+  }>('SELECT media_type FROM watched_items WHERE id = ? AND tmdb_id = ?', [localId, tmdbId]);
+  if (!row) throw new Error('The title no longer exists.');
+  return row.media_type;
+}
+async function pushRating(tmdbId: number, rating: Rating, mediaType?: MediaType): Promise<void> {
+  const type = mediaType ?? (await resolveType(tmdbId, rating.itemId));
+  await enqueue('ratings', identity(tmdbId, type), {
+    ...rating,
+    tmdbId,
+    mediaType: type,
+    updatedAt: rating.createdAt
+  });
+}
+async function pushEpisodeRating(tmdbId: number, rating: EpisodeRating): Promise<void> {
+  await enqueue('episode_ratings', `${identity(tmdbId, 'tv')}:${rating.seasonNumber}:${rating.episodeNumber}`, {
+    ...rating,
+    tmdbId,
+    mediaType: 'tv',
+    deleted: false,
+    updatedAt: rating.createdAt
+  });
+}
+async function pushPeople(tmdbId: number, people: PersonEntry[]): Promise<void> {
+  for (const p of people) {
+    const type = await resolveType(tmdbId, p.itemId);
+    await enqueue('people', `${identity(tmdbId, type)}:${p.personId}:${p.role}`, {
+      ...p,
+      tmdbId,
+      mediaType: type,
+      updatedAt: nextTimestamp()
+    });
   }
 }
-
-// ── Full Sync ───────────────────────────────────────────────────────
-
-/**
- * Perform a full bidirectional sync:
- * 1. Pull all cloud data
- * 2. Merge into local SQLite (cloud wins on conflict by updatedAt)
- * 3. Push any local-only items to cloud
- *
- * This function is imported and called by database.ts to avoid circular deps.
- * The merge logic is handled in database.ts via mergeCloudData().
- */
-async function fullSync(
-  mergeCloudToLocal: (data: CloudData) => Promise<void>,
-  getLocalItems: () => Promise<WatchedItem[]>,
-  getLocalRating: (itemId: number) => Promise<Rating | null>,
-  getLocalEpisodeRatings: (itemId: number) => Promise<EpisodeRating[]>
-): Promise<{ pulled: number; pushed: number }> {
-  if (!isReady()) return { pulled: 0, pushed: 0 };
-  if (_isSyncing) {
-    console.log('[CloudSync] Sync already in progress — skipping.');
-    return { pulled: 0, pushed: 0 };
+async function pushPreference(key: string, value: string): Promise<void> {
+  if (!EXCLUDED.has(key)) await enqueue('settings', key, {
+    key,
+    value,
+    updatedAt: nextTimestamp()
+  });
+}
+async function deleteItemCloud(tmdbId: number, mediaType: MediaType = 'movie'): Promise<void> {
+  const {
+    getDbAsync
+  } = await import('./database');
+  const boundary = await (await getDbAsync()).getFirstAsync<{
+    deleted_at: string;
+  }>('SELECT deleted_at FROM sync_tombstones WHERE entity_key=?', [identity(tmdbId, mediaType)]);
+  await enqueue('watched_items', identity(tmdbId, mediaType), {
+    tmdbId,
+    mediaType,
+    deleted: true,
+    updatedAt: boundary?.deleted_at ?? nextTimestamp()
+  });
+}
+async function deleteEpisodeRatingCloud(tmdbId: number, seasonNumber: number, episodeNumber: number): Promise<void> {
+  await enqueue('episode_ratings', `${identity(tmdbId, 'tv')}:${seasonNumber}:${episodeNumber}`, {
+    tmdbId,
+    mediaType: 'tv',
+    seasonNumber,
+    episodeNumber,
+    deleted: true,
+    updatedAt: nextTimestamp()
+  });
+}
+async function pushActivity(record: ActivityRecord): Promise<void> {
+  await enqueue('activity', record.key, record);
+}
+async function pullAllData(): Promise<CloudData | null> {
+  if (!owner) return null;
+  const db = getFirestoreDb();
+  const buckets = ['watched_items', 'ratings', 'episode_ratings', 'people', 'settings', 'activity'];
+  const snaps = await bounded(Promise.all(buckets.map(b => getDocs(collection(db, 'matinee_users', owner!, b)))));
+  const [watchedItems, ratings, episodeRatings, people, settings, activity] = snaps.map(s => Object.fromEntries(s.docs.map(d => [d.id, d.data()])));
+  // Old backups used numeric IDs. Keep them as a fallback; typed IDs always take precedence.
+  for (const [id, r] of Object.entries(watchedItems)) if (!id.includes(':')) {
+    const key = identity(r.tmdbId, r.mediaType);
+    if (!watchedItems[key]) watchedItems[key] = r;
+    delete watchedItems[id];
   }
-
-  _isSyncing = true;
-  let pulled = 0;
-  let pushed = 0;
-
-  try {
-    // Step 1: Pull from cloud and merge into local
-    const cloudData = await pullAllData();
-    if (cloudData) {
-      pulled = Object.keys(cloudData.watchedItems).length;
-      await mergeCloudToLocal(cloudData);
+  for (const [bucket, fallback] of [[ratings, null], [episodeRatings, 'tv'], [people, null]] as const) {
+    for (const [id, r] of Object.entries(bucket)) {
+      if (id.includes(':')) continue;
+      const tmdbId = r.tmdbId ?? Number(id.split('_')[0]);
+      const parent = Object.values(watchedItems).find(i => i.tmdbId === tmdbId && !i.deleted);
+      const mediaType = r.mediaType ?? fallback ?? parent?.mediaType;
+      if (!mediaType) continue;
+      const typed = bucket === ratings ? identity(tmdbId, mediaType) : bucket === episodeRatings ? `${identity(tmdbId, mediaType)}:${r.seasonNumber}:${r.episodeNumber}` : `${identity(tmdbId, mediaType)}:${r.personId}:${r.role}`;
+      if (!bucket[typed]) bucket[typed] = {
+        ...r,
+        tmdbId,
+        mediaType
+      };
+      delete bucket[id];
     }
-
-    // Step 2: Push local items that aren't in the cloud yet
-    const localItems = await getLocalItems();
-    const cloudTmdbIds = new Set(
-      cloudData ? Object.keys(cloudData.watchedItems) : []
-    );
-
-    for (const item of localItems) {
-      if (!cloudTmdbIds.has(String(item.tmdbId))) {
+  }
+  const preferences: Record<string, string> = {};
+  const old = await bounded(getDoc(doc(db, 'matinee_users', owner, 'meta', 'preferences')));
+  if (old.exists()) for (const [k, v] of Object.entries(old.data())) if (!EXCLUDED.has(k) && typeof v === 'string' && !k.startsWith('_')) preferences[k] = v;
+  for (const r of Object.values(settings)) if (!EXCLUDED.has(r.key)) preferences[r.key] = r.value;
+  return {
+    watchedItems,
+    ratings,
+    episodeRatings,
+    people,
+    preferences,
+    activity: activity as Record<string, ActivityRecord>
+  };
+}
+async function fullSync(merge: (data: CloudData) => Promise<void>, getItems: () => Promise<WatchedItem[]>, getRating: (id: number) => Promise<Rating | null>, getEpisodes: (id: number) => Promise<EpisodeRating[]>): Promise<{
+  pulled: number;
+  pushed: number;
+}> {
+  if (!owner || syncing) return {
+    pulled: 0,
+    pushed: 0
+  };
+  syncing = true;
+  try {
+    await flushQueue();
+    const cloud = await pullAllData();
+    if (!cloud) return {
+      pulled: 0,
+      pushed: 0
+    };
+    await merge(cloud);
+    const items = await getItems();
+    let pushed = 0;
+    for (const item of items) {
+      const remote = cloud.watchedItems[identity(item.tmdbId, item.mediaType)];
+      if (!remote || timestamp(item.updatedAt) > timestamp(remote.updatedAt)) {
         await pushItem(item);
-        // Also push the rating if it exists
-        const rating = await getLocalRating(item.id);
-        if (rating) {
-          await pushRating(item.tmdbId, rating);
-        }
-        // Push episode ratings
-        const epRatings = await getLocalEpisodeRatings(item.id);
-        for (const ep of epRatings) {
-          await pushEpisodeRating(item.tmdbId, ep);
-        }
         pushed++;
       }
+      const rating = await getRating(item.id);
+      const remoteRating = cloud.ratings[identity(item.tmdbId, item.mediaType)];
+      if (rating && (!remoteRating || timestamp(rating.createdAt) > timestamp(remoteRating.updatedAt ?? remoteRating.createdAt))) await pushRating(item.tmdbId, rating, item.mediaType);
+      for (const ep of await getEpisodes(item.id)) {
+        const remoteEp = cloud.episodeRatings[`${identity(item.tmdbId, 'tv')}:${ep.seasonNumber}:${ep.episodeNumber}`];
+        if (!remoteEp || timestamp(ep.createdAt) > timestamp(remoteEp.updatedAt ?? remoteEp.createdAt)) await pushEpisodeRating(item.tmdbId, ep);
+      }
     }
-
-    _lastSyncTime = new Date().toISOString();
-    console.log(`[CloudSync] Sync complete — pulled ${pulled}, pushed ${pushed}`);
-  } catch (err) {
-    console.error('[CloudSync] fullSync failed:', err);
+    const localDatabase = await (await import('./database')).getDbAsync();
+    const preferences = await localDatabase.getAllAsync<{
+      key: string;
+      value: string;
+    }>('SELECT key,value FROM preferences');
+    for (const preference of preferences) if (!EXCLUDED.has(preference.key) && !(preference.key in cloud.preferences)) await pushPreference(preference.key, preference.value);
+    const people = await localDatabase.getAllAsync<{
+      item_id: number;
+      tmdb_id: number;
+      media_type: MediaType;
+      person_id: number;
+      person_name: string;
+      role: 'director' | 'actor';
+      profile_path: string | null;
+    }>('SELECT p.*,w.tmdb_id,w.media_type FROM director_actor_cache p JOIN watched_items w ON w.id=p.item_id');
+    for (const p of people) if (!cloud.people[`${identity(p.tmdb_id, p.media_type)}:${p.person_id}:${p.role}`]) await pushPeople(p.tmdb_id, [{
+      itemId: p.item_id,
+      personId: p.person_id,
+      personName: p.person_name,
+      role: p.role,
+      profilePath: p.profile_path
+    }]);
+    const activity = await (await import('./libraryActivity')).readActivity(undefined, true);
+    for (const record of activity) if (!cloud.activity?.[record.key] || timestamp(record.updatedAt) > timestamp(cloud.activity[record.key].updatedAt)) await pushActivity(record);
+    await flushQueue();
+    lastSync = nextTimestamp();
+    return {
+      pulled: Object.keys(cloud.watchedItems).length,
+      pushed
+    };
+  } catch (e: any) {
+    lastError = e.message;
+    throw e;
   } finally {
-    _isSyncing = false;
+    syncing = false;
   }
-
-  return { pulled, pushed };
 }
-
-// ── Destructive Operations ──────────────────────────────────────────
-
-/**
- * Delete ALL user data from Firestore.  This is irreversible.
- */
 async function deleteAllCloudData(): Promise<void> {
-  if (!isReady()) return;
-
-  try {
-    const db = getDb()!;
-    const basePath = `matinee_users/${userDocPath!}`;
-
-    // Collect all subcollection names and delete their documents
-    const subcollections = [
-      'watched_items',
-      'ratings',
-      'episode_ratings',
-      'people',
-      'meta',
-    ];
-
-    for (const subcol of subcollections) {
-      const snap = await getDocs(collection(db, basePath, subcol));
-      if (snap.empty) continue;
-
-      // Firestore batches support up to 500 operations
-      const BATCH_SIZE = 450;
-      let batch = writeBatch(db);
-      let count = 0;
-
-      snap.forEach((docSnap) => {
-        batch.delete(docSnap.ref);
-        count++;
-        if (count >= BATCH_SIZE) {
-          batch.commit().catch((e) =>
-            console.warn(`[CloudSync] Batch delete error in ${subcol}:`, e)
-          );
-          batch = writeBatch(db);
-          count = 0;
-        }
-      });
-
-      if (count > 0) await batch.commit();
+  if (!owner) return;
+  for (const bucket of ['watched_items', 'ratings', 'episode_ratings', 'people', 'meta', 'settings', 'activity']) {
+    const snap = await bounded(getDocs(collection(getFirestoreDb(), 'matinee_users', owner, bucket)));
+    for (let i = 0; i < snap.docs.length; i += 400) {
+      const batch = writeBatch(getFirestoreDb());
+      snap.docs.slice(i, i + 400).forEach(d => batch.delete(d.ref));
+      await bounded(batch.commit());
     }
-
-    // Delete the user root document itself (if it exists)
-    await deleteDoc(doc(db, 'matinee_users', userDocPath!));
-
-    console.log('[CloudSync] All cloud data deleted.');
-  } catch (err) {
-    console.error('[CloudSync] deleteAllCloudData failed:', err);
-    throw err; // Re-throw so the UI can show an error
   }
+  await mutateQueue(q => q.filter(p => p.owner !== owner && p.owner !== 'local'));
 }
-
-// ── Status ──────────────────────────────────────────────────────────
-
-function getLastSyncTime(): string | null {
-  return _lastSyncTime;
+async function getSyncStatus() {
+  await queueLock;
+  return {
+    pending: (await readQueue()).filter(p => p.owner === owner || p.owner === 'local').length,
+    error: lastError,
+    email: auth().currentUser?.email ?? null,
+    authenticated: !!auth().currentUser,
+    lastSync
+  };
 }
-
-function isSyncing(): boolean {
-  return _isSyncing;
-}
-
-function isCloudEnabled(): boolean {
-  return isFirebaseConfigured() && !!userDocPath;
-}
-
-// ── Exports ─────────────────────────────────────────────────────────
-
 export const cloudSync = {
   initCloudSync,
-  isCloudEnabled,
-  isReady,
-  isSyncing,
-  getLastSyncTime,
-
-  // Push (local → cloud)
   pushItem,
   pushRating,
   pushEpisodeRating,
@@ -516,15 +361,16 @@ export const cloudSync = {
   pushPreference,
   deleteItemCloud,
   deleteEpisodeRatingCloud,
-
-  // Pull (cloud → local)
+  pushActivity,
   pullAllData,
-
-  // Full sync
   fullSync,
-
-  // Destructive
   deleteAllCloudData,
+  connectAccount,
+  disconnectAccount,
+  getSyncStatus,
+  flushQueue,
+  getLastSyncTime: () => lastSync,
+  isSyncing: () => syncing,
+  isCloudEnabled: () => !!owner,
+  getUserPath: () => owner
 };
-
-export type { CloudData };

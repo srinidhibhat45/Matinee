@@ -1,3 +1,4 @@
+import { getSecret, setSecret, removeSecret } from './secrets';
 // ============================================================
 // Matinee — TMDB API v3 Service
 // Comprehensive wrapper with caching, normalization, and
@@ -290,7 +291,7 @@ const DEFAULT_API_KEY = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJmYjQ2YzBlNDk0MmM5MGIyZG
 async function getApiKey(): Promise<string | null> {
   if (settingsMemo.apiKey !== undefined) return settingsMemo.apiKey;
   try {
-    const key = await AsyncStorage.getItem(API_KEY_STORAGE);
+    const key = await getSecret(API_KEY_STORAGE);
     settingsMemo.apiKey = key?.trim() || DEFAULT_API_KEY;
   } catch {
     settingsMemo.apiKey = DEFAULT_API_KEY;
@@ -717,7 +718,7 @@ export const tmdbService = {
    * Save the TMDB v3 API key or Bearer token for future requests.
    */
   async setApiKey(key: string): Promise<void> {
-    await AsyncStorage.setItem(API_KEY_STORAGE, key.trim());
+    await setSecret(API_KEY_STORAGE, key.trim());
     invalidateTmdbSettingsCache();
   },
 
@@ -738,7 +739,7 @@ export const tmdbService = {
    * Remove the stored API key.
    */
   async removeApiKey(): Promise<void> {
-    await AsyncStorage.removeItem(API_KEY_STORAGE);
+    await removeSecret(API_KEY_STORAGE);
     invalidateTmdbSettingsCache();
   },
 
@@ -946,8 +947,8 @@ export const tmdbService = {
     const providerData = raw['watch/providers']?.results;
     let watchProviders = null;
     if (providerData) {
-      const userCountry = (await getPreference('PREF_USER_COUNTRY')) || 'US';
-      watchProviders = providerData[userCountry] ?? providerData.US ?? providerData.IN ?? Object.values(providerData)[0] ?? null;
+      const userCountry = (await getPreference('PREF_USER_COUNTRY')) || 'IN';
+      watchProviders = providerData[userCountry] ?? null;
     }
 
     // Normalize recommendations and similar

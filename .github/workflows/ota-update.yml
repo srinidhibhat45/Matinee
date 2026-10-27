@@ -49,12 +49,7 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
-          NATIVE=false
-
-          # Native project dirs and lockfile/dependency changes require a rebuild.
-          if echo "$CHANGED" | grep -qE '^(android|ios)/'; then NATIVE=true; fi
-          if echo "$CHANGED" | grep -qE '^package(-lock)?\.json$'; then NATIVE=true; fi
-          if echo "$CHANGED" | grep -qE '^(app\.json|app\.config\.[jt]s|eas\.json)$'; then NATIVE=true; fi
+          NATIVE=$(node scripts/native-changes.cjs "$BEFORE_SHA" "$CURRENT_SHA")
 
           echo "native_changed=$NATIVE" >> "$GITHUB_OUTPUT"
           if [ "$NATIVE" = "true" ]; then

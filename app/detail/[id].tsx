@@ -1,3 +1,10 @@
+import { bookmarkTitle } from '../../services/libraryActions';
+import DetailTools from '../../components/library/DetailTools';
+import EpisodeProgress from '../../components/library/EpisodeProgress';
+import StreamingAvailability from '../../components/library/StreamingAvailability';
+import { useLibrary, refreshLibrary } from '../../hooks/useLibrary';
+import { toggleBookmark, snapshotItem, localDay, addViewing, setWatching, markEpisode } from '../../services/libraryActivity';
+import { useNotice } from '../../context/NoticeContext';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
@@ -16,13 +23,13 @@ import {
   Platform,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
 import { useResponsive } from '../../hooks/useResponsive';
 import { shape, spacing } from '../../constants/m3';
-import { IconButton, Snackbar } from '../../components/m3';
+import { Button, IconButton, Snackbar } from '../../components/m3';
 import { tmdbService, getImageUrl } from '../../services/tmdb';
 import { recommendationService } from '../../services/recommendations';
 import {
@@ -251,6 +258,12 @@ function DetailedStarRow({
 export default function DetailScreen() {
   const { id, mediaType: mt, autoRate, reason } = useLocalSearchParams<{ id: string; mediaType: string; autoRate?: string; reason?: string }>();
   const router = useRouter();
+  const library = useLibrary();
+  const notice = useNotice();
+  const actionBusy = useRef(false);
+  const detailScroll = useRef<ScrollView>(null);
+  const episodeFormY = useRef(0);
+  const isBookmarked = library.items.some(i=>i.tmdbId===Number(id)&&i.mediaType===(mt||'movie')&&i.status==='watchlist') || library.activity.some(r=>r.key===`bookmark:${mt||'movie'}:${id}`);
   const { colors, isDark, reduceMotion } = useTheme();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useResponsive();
@@ -282,6 +295,7 @@ export default function DetailScreen() {
   const [loading, setLoading] = useState(true);
   const isUnreleased = details?.releaseDate ? new Date(details.releaseDate) > new Date() : false;
   const [itemStatus, setItemStatus] = useState<string | null>(null);
+  useEffect(()=>{if(library.ready)setItemStatus(library.items.find(i=>i.tmdbId===tmdbId&&i.mediaType===mediaType)?.status??null);},[library.items,library.ready,tmdbId,mediaType]);
   const [userRating, setUserRating] = useState<number | null>(null);
 
   // Bottom Sheet and Inline Rating States
@@ -548,21 +562,28 @@ export default function DetailScreen() {
 
   const handleAction = useCallback(
     async (status: 'watched' | 'watchlist' | 'interested' | 'not_interested') => {
+      if (actionBusy.current) return;
+      actionBusy.current = true;
       try {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        if (status === 'watchlist') {
+          const saved = await bookmarkTitle(details);
+          await refreshLibrary();
+          setItemStatus((await getItem(tmdbId,mediaType))?.status??null);
+          notice({message:saved?'Added to bookmarks':'Bookmark removed',undo:async()=>{await bookmarkTitle(details);await refreshLibrary();}});
+          return;
+        }
+        if (status === 'watched' && itemStatus === 'watched') { setIsRatingMode(true); return; }
+        if (status === 'not_interested') {
+          const previous = await getItem(tmdbId,mediaType);
+          if (previous) { const undo = await snapshotItem(previous); notice({message:'Hidden from recommendations',undo}); }
+        }
 
-        if (itemStatus === status) {
-          // Unbookmark: delete the item from the DB
-          const existing = await getItem(tmdbId, mediaType);
-          if (existing) {
-            await deleteItem(existing.id);
-          }
-          // Drop any release reminder that was scheduled alongside it,
-          // otherwise the user keeps getting alerts for a removed title.
-          await notificationService.cancelReminder(tmdbId, mediaType);
-          setItemStatus(null);
-          setUserRating(null);
-          setEpisodeRatings([]);
+        if (itemStatus === status && status === 'not_interested') {
+          const existing = await getItem(tmdbId,mediaType);
+          if (existing) await updateItem(existing.id,{status:'watchlist'});
+          setItemStatus('watchlist');
+          notice({message:'Restored to bookmarks'});
           return;
         }
 
@@ -598,18 +619,11 @@ export default function DetailScreen() {
           setIsRatingMode(true);
         }
 
-        if (status === 'watchlist' && details.releaseDate && new Date(details.releaseDate) > new Date()) {
-          await notificationService.scheduleReleaseReminder(
-            details.title,
-            details.releaseDate,
-            tmdbId,
-            mediaType,
-            details.posterPath
-          );
-        }
+
       } catch (err) {
         console.error('Action error:', err);
-      }
+        notice({message:'Could not save this change. Please try again.'});
+      } finally { actionBusy.current = false; }
     },
     [details, mediaType, tmdbId, itemStatus, persistPeople]
   );
@@ -642,10 +656,10 @@ export default function DetailScreen() {
           seasonCount: details.numberOfSeasons ?? null,
           certification: details.certification ?? null,
           voteAverage: details.voteAverage,
-          status: 'watched',
+          status: 'watchlist',
           watchedDate: new Date().toISOString().split('T')[0],
         });
-        setItemStatus('watched');
+        setItemStatus('watchlist');
         existing = await getItem(tmdbId, mediaType);
       }
 
@@ -658,6 +672,8 @@ export default function DetailScreen() {
           rating: episodeRatingInput,
           reviewText: episodeReviewInput.trim() || null,
         });
+
+        await markEpisode(details, seasonNum, epNum, true);
 
         // Increment episode number for convenience
         setEpisodeInput((prev) => {
@@ -697,7 +713,7 @@ export default function DetailScreen() {
     const month = watchMonth.trim().padStart(2, '0');
     const year = watchYear.trim();
     let watchedDateStr = `${year}-${month}-${day}`;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(watchedDateStr) || isNaN(Date.parse(watchedDateStr))) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(watchedDateStr) || isNaN(Date.parse(watchedDateStr)) || watchedDateStr > localDay() || new Date(`${watchedDateStr}T12:00:00Z`).toISOString().slice(0,10) !== watchedDateStr) {
       setDateError('Please enter a valid date.');
       return;
     }
@@ -774,7 +790,10 @@ export default function DetailScreen() {
         // status buttons entirely), so the people cache is refreshed here too.
         await persistPeople();
 
-        showSnackbar('Rating saved 🍿');
+        const diary = await (await import('../../services/libraryActivity')).readActivity('diary');
+        if (!diary.some(r=>r.payload.tmdbId===tmdbId&&r.payload.mediaType===mediaType&&r.payload.date===watchedDateStr)) await addViewing(details,watchedDateStr,reviewText);
+        await setWatching(details,false);
+        showSnackbar('Rating saved');
       }
     } catch (err) {
       console.error('Rating error:', err);
@@ -1195,6 +1214,7 @@ export default function DetailScreen() {
             </View>
 
             {/* Submit & Cancel Buttons */}
+            {overallRating === 0 && <View style={{marginBottom:12}}><Button label="Log as seen without a rating" icon="checkmark-circle-outline" variant="tonal" onPress={async()=>{if(actionBusy.current)return;actionBusy.current=true;try{const date=`${watchYear}-${watchMonth.padStart(2,'0')}-${watchDay.padStart(2,'0')}`;await addViewing(details,date,reviewText);setItemStatus('watched');setIsRatingMode(false);notice({message:'Logged as seen'});}catch(e:any){setDateError(e.message||'Could not log this title.');}finally{actionBusy.current=false;}}}/></View>}
             <View style={styles.ratingButtonRow}>
               <TouchableOpacity
                 style={[styles.ratingCancelBtn, { borderColor: colors.border }]}
@@ -1227,7 +1247,7 @@ export default function DetailScreen() {
             </View>
           </ScrollView>
         ) : (
-          <ScrollView
+          <ScrollView ref={detailScroll}
             key="detail-scroll"
             style={{ flex: 1 }}
             showsVerticalScrollIndicator={false}
@@ -1306,22 +1326,7 @@ export default function DetailScreen() {
                 </View>
               )}
 
-              {/* Watch Providers */}
-              {providers.length > 0 && (
-                <View style={styles.providersRow}>
-                  <Text style={[styles.providersLabel, { color: colors.secondary }]}>Stream:</Text>
-                  <View style={styles.providersList}>
-                    {providers.map((p: any) => (
-                      <Image
-                        key={p.provider_id}
-                        source={{ uri: getImageUrl(p.logo_path, 'w92') || "" }}
-                        style={styles.providerLogo}
-                        accessibilityLabel={p.provider_name}
-                      />
-                    ))}
-                  </View>
-                </View>
-              )}
+
             </View>
           </View>
 
@@ -1447,20 +1452,20 @@ export default function DetailScreen() {
             style={[
               styles.actionButton,
               { backgroundColor: colors.elevated, borderColor: colors.border },
-              itemStatus === 'watchlist' && { borderColor: colors.accent, backgroundColor: colors.accentMuted },
+              isBookmarked && { borderColor: colors.accent, backgroundColor: colors.accentMuted },
             ]}
             onPress={() => handleAction('watchlist')}
           >
             <Ionicons
-              name={itemStatus === 'watchlist' ? 'bookmark' : 'bookmark-outline'}
+              name={isBookmarked ? 'bookmark' : 'bookmark-outline'}
               size={20}
-              color={itemStatus === 'watchlist' ? colors.accent : colors.text}
+              color={isBookmarked ? colors.accent : colors.text}
             />
             <Text
               style={[
                 styles.actionButtonText,
                 { color: colors.text },
-                itemStatus === 'watchlist' && { color: colors.accent },
+                isBookmarked && { color: colors.accent },
               ]}
             >
               Watchlist
@@ -1480,6 +1485,9 @@ export default function DetailScreen() {
             </TouchableOpacity>
           )}
         </View>
+
+        <DetailTools item={details} />
+        <StreamingAvailability providers={details.watchProviders} />
 
         {/* Media & Links Row */}
         <View style={[styles.actionRow, { marginTop: 8 }]}>
@@ -1653,7 +1661,7 @@ export default function DetailScreen() {
                   {person.profile_path ? (
                     <Image
                       source={{
-                        uri: `https://image.tmdb.org/t/p/w185${person.profile_path}`,
+                        uri: getImageUrl(person.profile_path, 'w185') || '',
                       }}
                       style={[styles.castPhoto, { backgroundColor: colors.card }]}
                     />
@@ -1674,149 +1682,11 @@ export default function DetailScreen() {
           </View>
         )}
 
-        {/* Seasons & Episodes directory for TV Series */}
-        {mediaType === 'tv' && tvSeasons.length > 0 && (
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 12 }]}>Seasons & Episodes</Text>
-            
-            {/* Season tabs */}
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ gap: 8, paddingBottom: 8 }}
-            >
-              {tvSeasons.map((season) => {
-                const isActive = activeSeasonNumber === season.season_number;
-                return (
-                  <TouchableOpacity
-                    key={season.id}
-                    style={[
-                      styles.seasonTabBtn,
-                      { backgroundColor: colors.card, borderColor: colors.border },
-                      isActive && { backgroundColor: colors.accent, borderColor: colors.accent },
-                    ]}
-                    onPress={() => {
-                      setActiveSeasonNumber(season.season_number);
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    }}
-                    accessibilityRole="tab"
-                    accessibilityLabel={season.name || `Season ${season.season_number}`}
-                    accessibilityState={{ selected: isActive }}
-                  >
-                    <Text
-                      style={[
-                        styles.seasonTabText,
-                        { color: colors.secondary },
-                        isActive && { color: colors.bg, fontWeight: '700' },
-                      ]}
-                    >
-                      {season.name || `Season ${season.season_number}`}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-
-            {/* Episodes List */}
-            <View style={[styles.episodesContainer, { marginTop: 12 }]}>
-              {episodesLoading ? (
-                <ActivityIndicator size="small" color={colors.accent} style={{ marginVertical: 24 }} />
-              ) : episodes && episodes.length > 0 ? (
-                <View style={styles.episodesList}>
-                  {episodes.map((ep) => {
-                    const isFuture = isEpFuture(ep.air_date);
-                    const userEpRating = episodeRatings.find(
-                      (r) => r.seasonNumber === activeSeasonNumber && r.episodeNumber === ep.episode_number
-                    )?.rating;
-
-                    return (
-                      <TouchableOpacity
-                        key={ep.id}
-                        style={[styles.episodeRow, { borderBottomColor: colors.border }]}
-                        activeOpacity={0.7}
-                        onPress={() => {
-                          if (!isFuture) {
-                            setSeasonInput(String(activeSeasonNumber));
-                            setEpisodeInput(String(ep.episode_number));
-                            showSnackbar(
-                              `Selected S${activeSeasonNumber} E${ep.episode_number} for logging`
-                            );
-                          }
-                        }}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Season ${activeSeasonNumber}, episode ${ep.episode_number}${
-                          ep.name ? `, ${ep.name}` : ''
-                        }${userEpRating ? `, your rating ${userEpRating} out of 10` : ''}${
-                          isFuture ? ', not yet aired' : ''
-                        }`}
-                        accessibilityHint={isFuture ? undefined : 'Selects this episode for logging'}
-                        accessibilityState={{ disabled: isFuture }}
-                      >
-                        {/* Still Image */}
-                        <View style={styles.epStillContainer}>
-                          {ep.still_path ? (
-                            <Image
-                              source={{ uri: getImageUrl(ep.still_path, 'w185') || "" }}
-                              style={styles.epStill}
-                              resizeMode="cover"
-                            />
-                          ) : (
-                            <View style={[styles.epStill, styles.epStillPlaceholder, { backgroundColor: colors.card }]}>
-                              <Ionicons name="image-outline" size={20} color={colors.muted} />
-                            </View>
-                          )}
-                          <View style={[styles.epNumberBadge, { backgroundColor: 'rgba(0,0,0,0.7)' }]}>
-                            <Text style={styles.epNumberText}>Ep {ep.episode_number}</Text>
-                          </View>
-                        </View>
-
-                        {/* Episode Info */}
-                        <View style={styles.epInfo}>
-                          <View style={styles.epTitleRow}>
-                            <Text style={[styles.epTitle, { color: colors.text }]} numberOfLines={1}>
-                              {ep.name || `Episode ${ep.episode_number}`}
-                            </Text>
-                            {userEpRating !== undefined && (
-                              <View style={[styles.epUserRatingBadge, { backgroundColor: colors.accentMuted }]}>
-                                <Ionicons name="star" size={10} color={colors.accent} />
-                                <Text style={[styles.epUserRatingText, { color: colors.accent }]}>
-                                  {userEpRating.toFixed(1)}
-                                </Text>
-                              </View>
-                            )}
-                          </View>
-
-                          <Text
-                            style={[
-                              styles.epAirDate,
-                              { color: isFuture ? colors.accent : colors.secondary }
-                            ]}
-                          >
-                            {isFuture ? `Airing: ${formatEpisodeAirDate(ep.air_date)}` : formatEpisodeAirDate(ep.air_date)}
-                          </Text>
-
-                          {ep.overview ? (
-                            <Text style={[styles.epOverview, { color: colors.muted }]} numberOfLines={2}>
-                              {ep.overview}
-                            </Text>
-                          ) : null}
-                        </View>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              ) : (
-                <Text style={[styles.emptyEpisodesText, { color: colors.muted }]}>
-                  No episodes found for this season.
-                </Text>
-              )}
-            </View>
-          </View>
-        )}
+        {mediaType === 'tv' && <EpisodeProgress item={details} ratings={episodeRatings} onRate={(season,episode)=>{setSeasonInput(String(season));setEpisodeInput(String(episode));detailScroll.current?.scrollTo({y:episodeFormY.current,animated:!reduceMotion});showSnackbar(`Rating S${season} E${episode}`);}} />}
 
         {/* Episode Logging Section for TV Series */}
         {mediaType === 'tv' && (
-          <View style={styles.section}>
+          <View style={styles.section} onLayout={e=>{episodeFormY.current=e.nativeEvent.layout.y;}}>
             <View style={styles.sectionHeaderRow}>
               <Ionicons name="tv-outline" size={18} color={colors.accent} />
               <Text style={[styles.sectionTitle, { color: colors.text, marginLeft: 6, marginBottom: 0 }]}>

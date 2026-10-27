@@ -1,6 +1,8 @@
+import { NoticeProvider } from '../context/NoticeContext';
+import { getSecret, setSecret, removeSecret } from '../services/secrets';
 import { useEffect, useState } from 'react';
 import { Stack, router } from 'expo-router';
-import { StatusBar, View, Platform } from 'react-native';
+import { StatusBar, View, Platform, AppState } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { Loading } from '../components/m3';
 import { initDatabase, performFullSync, getPreference, setPreference } from '../services/database';
@@ -13,6 +15,19 @@ import UpdateBanner from '../components/UpdateBanner';
 
 function RootLayoutContent({ isReady }: { isReady: boolean }) {
   const { colors, isDark } = useTheme();
+  useEffect(() => {
+    if (!isReady) return;
+    let lastAttempt = 0;
+    const retry = () => {
+      if (Date.now() - lastAttempt < 60000 || !cloudSync.isCloudEnabled()) return;
+      lastAttempt = Date.now();
+      performFullSync().catch(() => {});
+    };
+    const subscription = AppState.addEventListener('change', state => { if (state === 'active') retry(); });
+    const timer = setInterval(retry, 120000);
+    return () => { subscription.remove(); clearInterval(timer); };
+  }, [isReady]);
+
 
   useEffect(() => {
     if (!isReady || Platform.OS === 'web') return;
@@ -74,7 +89,7 @@ function RootLayoutContent({ isReady }: { isReady: boolean }) {
         barStyle={isDark ? 'light-content' : 'dark-content'}
         backgroundColor={colors.background}
       />
-      <Stack
+      <NoticeProvider><Stack
         screenOptions={{
           headerShown: false,
           contentStyle: { backgroundColor: colors.background },
@@ -93,7 +108,7 @@ function RootLayoutContent({ isReady }: { isReady: boolean }) {
         />
       </Stack>
 
-      <UpdateBanner />
+      <UpdateBanner /></NoticeProvider>
 
     </>
   );
@@ -107,36 +122,14 @@ export default function RootLayout() {
       try {
         // 1. Initialise local database
         await initDatabase();
-        await notificationService.initialize();
+        setIsReady(true);
+        notificationService.initialize().catch(console.warn);
 
         // 2. Initialise cloud sync and autofill bound keys (if Firebase is configured)
         if (isFirebaseConfigured()) {
           try {
-            let apiKey = await AsyncStorage.getItem('@matinee_api_key');
-            let geminiKey = await getPreference('PREF_GEMINI_API_KEY');
-
-            if (apiKey && !geminiKey) {
-              const bound = await lookupKey(apiKey);
-              if (bound.geminiKey) {
-                geminiKey = bound.geminiKey;
-                await setPreference('PREF_GEMINI_API_KEY', geminiKey);
-                console.log('[RootLayout] Automatically restored Gemini key from bound TMDB key.');
-              }
-            } else if (!apiKey && geminiKey) {
-              const bound = await lookupKey(geminiKey);
-              if (bound.tmdbKey) {
-                apiKey = bound.tmdbKey;
-                await setPreference('API_KEY_STORAGE', apiKey);
-                await AsyncStorage.setItem('@matinee_api_key', apiKey);
-                await tmdbService.setApiKey(apiKey);
-                console.log('[RootLayout] Automatically restored TMDB key from bound Gemini key.');
-              }
-            } else if (apiKey && geminiKey) {
-              // Ensure they are bound in the cloud
-              bindKeys(apiKey, geminiKey).catch(() => {});
-            }
-
-            if (apiKey) {
+            const apiKey = await getSecret('@matinee_api_key');
+            {
               const cloudReady = await cloudSync.initCloudSync(apiKey);
               if (cloudReady) {
                 // Background sync — don't await, let it run while user interacts

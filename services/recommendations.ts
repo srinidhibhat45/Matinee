@@ -1,3 +1,5 @@
+import { readActivity } from './libraryActivity';
+import { steerRecommendations } from './libraryLogic';
 import { TMDBMediaItem, RecommendedItem, MediaType } from '../types';
 import {
   getAllItems,
@@ -131,7 +133,7 @@ class RecommendationService {
       const cached = await getCache<RecommendedItem[]>(feedCacheKey);
       if (cached && cached.length > 0) {
         console.log(`[Personalized Recs] Served ${cached.length} from cache.`);
-        return cached;
+        return steerRecommendations(cached, await readActivity('feedback'), (await getPreference('PREF_ADVENTURE')) === 'true');
       }
     } catch {
       // A cache miss is never a reason to fail.
@@ -929,7 +931,7 @@ class RecommendationService {
       if (finalRecs.length > 0) {
         setCache(feedCacheKey, finalRecs, FEED_CACHE_TTL_MINUTES).catch(() => {});
       }
-      return finalRecs;
+      return steerRecommendations(finalRecs, await readActivity('feedback'), (await getPreference('PREF_ADVENTURE')) === 'true');
     } catch (error) {
       console.warn('Recommendation engine error:', error);
       return this.getRecommendationsForNewUser(limit, mediaType);
@@ -1142,7 +1144,7 @@ class RecommendationService {
       if (finalRecs.length > 0) {
         setCache(feedCacheKey, finalRecs, FEED_CACHE_TTL_MINUTES).catch(() => {});
       }
-      return finalRecs;
+      return steerRecommendations(finalRecs, await readActivity('feedback'), (await getPreference('PREF_ADVENTURE')) === 'true');
     } catch {
       return [];
     }

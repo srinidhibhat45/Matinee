@@ -1,8 +1,12 @@
+import { bookmarkTitle } from '../../services/libraryActions';
+import { normalizeCard } from '../../components/library/QuickActions';
+import { snapshotItem } from '../../services/libraryActivity';
+import { useNotice } from '../../context/NoticeContext';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, StyleSheet, FlatList, Image, RefreshControl } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
 import { useResponsive } from '../../hooks/useResponsive';
@@ -77,6 +81,7 @@ const itemKey = (mediaType: string | undefined, id: number) =>
 
 export default function UpcomingScreen() {
   const router = useRouter();
+  const notice = useNotice();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const { gutter, isCompact } = useResponsive();
@@ -343,59 +348,15 @@ export default function UpcomingScreen() {
 
       const existing = await getItem(tmdbId, mediaType);
 
+      const target = {...normalizeCard(longPressItem),mediaType};
       if (action === 'watchlist') {
-        if (existing?.status === 'watchlist') {
-          await deleteItem(existing.id);
-          await notificationService.cancelReminder(tmdbId, mediaType);
-        } else {
-          const status = 'watchlist';
-          const isUnreleased = longPressItem.releaseDate ? new Date(longPressItem.releaseDate) > new Date() : false;
-          await addItem({
-            tmdbId,
-            mediaType,
-            title: longPressItem.title,
-            posterPath: longPressItem.posterPath,
-            backdropPath: longPressItem.backdropPath,
-            overview: longPressItem.overview,
-            releaseDate: longPressItem.releaseDate,
-            genres: JSON.stringify(longPressItem.genreIds || []),
-            originalLanguage: longPressItem.originalLanguage,
-            runtime: 0,
-            voteAverage: longPressItem.voteAverage,
-            status,
-            watchedDate: null,
-          });
-
-          if (isUnreleased && longPressItem.releaseDate) {
-            await notificationService.scheduleReleaseReminder(
-              longPressItem.title,
-              longPressItem.releaseDate,
-              tmdbId,
-              mediaType,
-              longPressItem.posterPath
-            );
-          }
-        }
+        const saved = await bookmarkTitle(target);
+        notice({message:saved?'Added to bookmarks':'Bookmark removed',undo:async()=>{await bookmarkTitle(target);}});
       } else if (action === 'not_interested') {
-        if (existing) {
-          await deleteItem(existing.id);
-          await notificationService.cancelReminder(tmdbId, mediaType);
-        }
-        await addItem({
-          tmdbId,
-          mediaType,
-          title: longPressItem.title,
-          posterPath: longPressItem.posterPath,
-          backdropPath: longPressItem.backdropPath,
-          overview: longPressItem.overview,
-          releaseDate: longPressItem.releaseDate,
-          genres: JSON.stringify(longPressItem.genreIds || []),
-          originalLanguage: longPressItem.originalLanguage,
-          runtime: 0,
-          voteAverage: longPressItem.voteAverage,
-          status: 'not_interested',
-          watchedDate: null,
-        });
+        const undo = existing ? await snapshotItem(existing) : async()=>{const added=await getItem(tmdbId,mediaType);if(added)await deleteItem(added.id);};
+        await addItem({tmdbId,mediaType,title:target.title,posterPath:target.posterPath,backdropPath:target.backdropPath,overview:target.overview,releaseDate:target.releaseDate,genres:JSON.stringify(target.genreIds),originalLanguage:target.originalLanguage,runtime:target.runtime??0,voteAverage:target.voteAverage,status:'not_interested',watchedDate:existing?.watchedDate??null});
+        await notificationService.cancelReminder(tmdbId,mediaType);
+        notice({message:'Hidden from recommendations',undo});
       }
 
       setLongPressItem(null);
@@ -596,59 +557,13 @@ export default function UpcomingScreen() {
     });
   }, []);
 
-  const handleInterested = useCallback(
-    async (item: TMDBMediaItem) => {
-      try {
-        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        const existingStatus = dbStatusMap[itemKey(item.mediaType, item.id)];
-        if (existingStatus === 'watchlist') {
-          const existing = await getItem(item.id, item.mediaType);
-          if (existing) {
-            await deleteItem(existing.id);
-            await notificationService.cancelReminder(item.id, item.mediaType);
-            setDbStatusMap((prev) => {
-              const next = { ...prev };
-              delete next[itemKey(item.mediaType, item.id)];
-              return next;
-            });
-          }
-        } else {
-          await addItem({
-            tmdbId: item.id,
-            mediaType: item.mediaType,
-            title: item.title,
-            posterPath: item.posterPath,
-            backdropPath: item.backdropPath,
-            overview: item.overview,
-            releaseDate: item.releaseDate,
-            genres: JSON.stringify(item.genreIds),
-            originalLanguage: item.originalLanguage,
-            runtime: 0,
-            voteAverage: item.voteAverage,
-            status: 'watchlist',
-            watchedDate: null,
-          });
-
-          // Schedule notification
-          await notificationService.scheduleReleaseReminder(
-            item.title,
-            item.releaseDate,
-            item.id,
-            item.mediaType,
-            item.posterPath
-          );
-
-          setDbStatusMap((prev) => ({
-            ...prev,
-            [itemKey(item.mediaType, item.id)]: 'watchlist',
-          }));
-        }
-      } catch (err) {
-        console.error('Toggle interested error:', err);
-      }
-    },
-    [dbStatusMap]
-  );
+  const handleInterested = useCallback(async (item: TMDBMediaItem) => {
+    try {
+      const saved = await bookmarkTitle(item);
+      setDbStatusMap(prev=>({...prev,[itemKey(item.mediaType,item.id)]:saved?'watchlist':'interested'}));
+      notice({message:saved?'Added to bookmarks':'Bookmark removed',undo:async()=>{await bookmarkTitle(item);await fetchUpcoming(1,false);}});
+    } catch { notice({message:'Could not update the bookmark. Please try again.'}); }
+  }, [fetchUpcoming,notice]);
 
   const handleAddToCalendar = useCallback((item: TMDBMediaItem) => {
     const genres = item.genreIds

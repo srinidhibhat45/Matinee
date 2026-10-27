@@ -39,7 +39,7 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
-          if echo "$CHANGED" | grep -qE '^(android|ios)/|^package(-lock)?\.json$|^(app\.json|app\.config\.[jt]s|eas\.json)$'; then
+          if [ "$(node scripts/native-changes.cjs "$BEFORE_SHA" "$CURRENT_SHA")" = "true" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Native-affecting files changed — running a full APK build."
           else

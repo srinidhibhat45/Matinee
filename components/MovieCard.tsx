@@ -1,11 +1,13 @@
-import React, { useMemo } from 'react';
+import QuickActions from './library/QuickActions';
+import { getImageUrl } from '../services/tmdb';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, Image, StyleSheet } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { shape, spacing, withAlpha } from '../constants/m3';
 import { useTheme } from '../context/ThemeContext';
 import { Text, Touchable } from './m3';
 
-const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w342';
+
 
 /** Poster aspect ratio TMDB serves. Keeps every card the same shape. */
 const POSTER_RATIO = 3 / 2;
@@ -57,6 +59,8 @@ export default function MovieCard({
   showMediaTypeBadge = false,
 }: MovieCardProps) {
   const { colors } = useTheme();
+  const [failed,setFailed] = useState(false);
+  useEffect(()=>setFailed(false),[item.posterPath]);
   const cardWidth = width ?? SIZE_CONFIG[size].width;
   const posterHeight = Math.round(cardWidth * POSTER_RATIO);
 
@@ -75,7 +79,7 @@ export default function MovieCard({
     }
   }, [item.releaseDate]);
 
-  const posterUri = item.posterPath ? `${TMDB_IMAGE_BASE}${item.posterPath}` : null;
+  const posterUri = getImageUrl(item.posterPath, cardWidth <= 128 ? 'w185' : 'w342');
   const rating = item.voteAverage ? item.voteAverage.toFixed(1) : null;
   const typeLabel = item.mediaType === 'tv' ? 'Series' : 'Movie';
 
@@ -93,7 +97,7 @@ export default function MovieCard({
     .join(', ');
 
   return (
-    <Touchable
+    <View style={{width:cardWidth}}><Touchable
       onPress={() => onPress?.(item)}
       onLongPress={onLongPress ? () => onLongPress(item) : undefined}
       stateLayerColor={colors.onSurface}
@@ -113,9 +117,10 @@ export default function MovieCard({
           },
         ]}
       >
-        {posterUri ? (
+        {posterUri && !failed ? (
           <Image
-            source={{ uri: posterUri }}
+            source={{ uri: posterUri, cache: 'force-cache' }}
+            onError={()=>setFailed(true)}
             style={{ width: cardWidth, height: posterHeight }}
             resizeMode="cover"
             accessible={false}
@@ -173,7 +178,7 @@ export default function MovieCard({
           </Text>
         ) : null}
       </View>
-    </Touchable>
+    </Touchable><QuickActions item={item} /></View>
   );
 }
 

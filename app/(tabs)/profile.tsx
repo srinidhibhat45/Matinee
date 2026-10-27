@@ -1,3 +1,6 @@
+import AccountSync from '../../components/library/AccountSync';
+import LibraryBrowser from '../../components/library/LibraryBrowser';
+import { getSecret, setSecret, removeSecret } from '../../services/secrets';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Constants from 'expo-constants';
 import {
@@ -15,7 +18,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter, useLocalSearchParams, useFocusEffect, useNavigation } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../context/ThemeContext';
@@ -79,21 +82,7 @@ export default function ProfileScreen() {
 
   // Tile width is recomputed from the live window so the grid reflows on
   // rotation and on wide screens instead of being fixed at import time.
-  const gridCardWidth = useMemo(
-    () => gridItemWidth(width, posterColumns, gutter, GRID_GAP),
-    [width, posterColumns, gutter]
-  );
-  const gridPosterHeight = Math.round(gridCardWidth * 1.5);
-
-  const bottomPadding =
-    (isCompact ? NAVIGATION_BAR_HEIGHT + insets.bottom : insets.bottom) + 88;
-  const [activeTab, setActiveTab] = useState<LibraryTab>('watchlist');
-  const [filterMediaType, setFilterMediaType] = useState<MediaType | null>(null);
-  const [items, setItems] = useState<WatchedItem[]>([]);
-  const [counts, setCounts] = useState<Record<LibraryTab, number>>({
-    watched: 0,
-    watchlist: 0,
-  });
+  const bottomPadding = (isCompact ? NAVIGATION_BAR_HEIGHT + insets.bottom : insets.bottom) + 88;
   const [confirmModal, setConfirmModal] = useState<{
     visible: boolean;
     title: string;
@@ -122,116 +111,12 @@ export default function ProfileScreen() {
     return unsubscribe;
   }, [navigation]);
 
-  const fetchItems = useCallback(async () => {
-    try {
-      const allData = await getAllItems(undefined, filterMediaType || undefined);
-      
-      const watched = allData.filter((i) => i.status === 'watched');
-      const watchlist = allData.filter((i) => i.status === 'watchlist');
-
-      setCounts({
-        watched: watched.length,
-        watchlist: watchlist.length,
-      });
-
-      if (activeTab === 'watched') {
-        setItems(watched);
-      } else {
-        const now = new Date();
-        const upcoming = watchlist.filter((item) => {
-          if (!item.releaseDate) return false;
-          try {
-            return new Date(item.releaseDate) > now;
-          } catch {
-            return false;
-          }
-        });
-        const released = watchlist.filter((item) => {
-          if (!item.releaseDate) return true;
-          try {
-            return new Date(item.releaseDate) <= now;
-          } catch {
-            return true;
-          }
-        });
-
-        upcoming.sort((a, b) => new Date(a.releaseDate).getTime() - new Date(b.releaseDate).getTime());
-        released.sort((a, b) => {
-          if (!a.releaseDate && !b.releaseDate) return 0;
-          if (!a.releaseDate) return 1;
-          if (!b.releaseDate) return -1;
-          return new Date(b.releaseDate).getTime() - new Date(a.releaseDate).getTime();
-        });
-
-        setItems([...upcoming, ...released]);
-      }
-    } catch (err) {
-      console.error('Fetch library items error:', err);
-    }
-  }, [activeTab, filterMediaType]);
-
   const [showSettings, setShowSettings] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [savedApiKey, setSavedApiKey] = useState('');
   const [apiProxy, setApiProxy] = useState('');
   const [savedApiProxy, setSavedApiProxy] = useState('');
   const [refreshing, setRefreshing] = useState(false);
-  const [longPressItem, setLongPressItem] = useState<any | null>(null);
-
-  const handleLibraryItemLongPress = useCallback(async (item: any) => {
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      setLongPressItem(item);
-    } catch (err) {
-      console.error('Library long press error:', err);
-    }
-  }, []);
-
-  const handleLongPressAction = useCallback(async (action: 'rate' | 'remove' | 'not_interested') => {
-    if (!longPressItem) return;
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      const tmdbId = longPressItem.tmdbId;
-      const mediaType = longPressItem.mediaType;
-
-      if (action === 'rate') {
-        setLongPressItem(null);
-        router.push({
-          pathname: '/detail/[id]',
-          params: { id: String(tmdbId), mediaType, autoRate: 'true' },
-        });
-        return;
-      }
-
-      if (action === 'remove') {
-        await deleteItem(longPressItem.id);
-        // Removing a watchlisted title must also drop its release reminders.
-        await notificationService.cancelReminder(tmdbId, mediaType);
-      } else if (action === 'not_interested') {
-        await addItem({
-          tmdbId,
-          mediaType,
-          title: longPressItem.title,
-          posterPath: longPressItem.posterPath,
-          backdropPath: longPressItem.backdropPath,
-          overview: longPressItem.overview,
-          releaseDate: longPressItem.releaseDate,
-          genres: longPressItem.genres,
-          originalLanguage: longPressItem.originalLanguage,
-          runtime: longPressItem.runtime,
-          voteAverage: longPressItem.voteAverage,
-          status: 'not_interested',
-          watchedDate: null,
-        });
-      }
-
-      setLongPressItem(null);
-      await fetchItems();
-    } catch (err) {
-      console.error('Library long press action error:', err);
-    }
-  }, [longPressItem, fetchItems, router]);
-
   const [backupBusy, setBackupBusy] = useState(false);
   const [restoreBusy, setRestoreBusy] = useState(false);
 
@@ -239,7 +124,7 @@ export default function ProfileScreen() {
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
   const [includeAdult, setIncludeAdult] = useState(false);
   const [filterByCountry, setFilterByCountry] = useState(false);
-  const [userCountry, setUserCountry] = useState('US');
+  const [userCountry, setUserCountry] = useState('IN');
   const [countryDropdownOpen, setCountryDropdownOpen] = useState(false);
   const [selectedOttProviders, setSelectedOttProviders] = useState<number[]>([]);
   const [geminiApiKey, setGeminiApiKey] = useState('');
@@ -327,16 +212,6 @@ export default function ProfileScreen() {
   }, []);
 
   // Sync tab/mediaType search params if they are passed
-  useEffect(() => {
-    if (tab === 'watchlist' || tab === 'watched') {
-      setActiveTab(tab);
-    }
-    if (mediaType === 'movie' || mediaType === 'tv') {
-      setFilterMediaType(mediaType);
-    } else if (mediaType === 'clear') {
-      setFilterMediaType(null);
-    }
-  }, [tab, mediaType]);
 
   const loadPreferences = useCallback(async () => {
     try {
@@ -360,7 +235,7 @@ export default function ProfileScreen() {
       setFilterByCountry(filterByCountryVal === 'true');
 
       const userCountryVal = await getPreference('PREF_USER_COUNTRY');
-      setUserCountry(userCountryVal || 'US');
+      setUserCountry(userCountryVal || 'IN');
 
       const ottPref = await getPreference('PREF_OTT_PROVIDERS');
       if (ottPref) setSelectedOttProviders(ottPref.split(',').map(Number).filter(Boolean));
@@ -377,30 +252,6 @@ export default function ProfileScreen() {
         setSavedApiProxy(proxy);
       }
 
-      // Handle key binding lookup / sync at load time
-      if (isFirebaseConfigured()) {
-        if (key && !geminiKey) {
-          const bound = await lookupKey(key);
-          if (bound.geminiKey) {
-            await setPreference('PREF_GEMINI_API_KEY', bound.geminiKey);
-            setGeminiApiKey(bound.geminiKey);
-            setSavedGeminiApiKey(bound.geminiKey);
-          }
-        } else if (!key && geminiKey) {
-          const bound = await lookupKey(geminiKey);
-          if (bound.tmdbKey) {
-            await setPreference('API_KEY_STORAGE', bound.tmdbKey);
-            await AsyncStorage.setItem('@matinee_api_key', bound.tmdbKey);
-            await tmdbService.setApiKey(bound.tmdbKey);
-            setApiKey(bound.tmdbKey);
-            setSavedApiKey(bound.tmdbKey);
-            cloudSync.initCloudSync(bound.tmdbKey).catch(() => {});
-          }
-        } else if (key && geminiKey) {
-          // ensure they are bound
-          bindKeys(key, geminiKey).catch(() => {});
-        }
-      }
     } catch (err) {
       console.error('Load preferences error:', err);
     }
@@ -408,19 +259,18 @@ export default function ProfileScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      fetchItems();
       loadPreferences();
       return () => {
         setShowSettings(false);
       };
-    }, [fetchItems, loadPreferences])
+    }, [loadPreferences])
   );
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([fetchItems(), loadPreferences()]);
+    await loadPreferences();
     setRefreshing(false);
-  }, [fetchItems, loadPreferences]);
+  }, [loadPreferences]);
 
   const handleToggleLanguage = useCallback(async (langCode: string) => {
     setSelectedLanguages((prev) => {
@@ -490,26 +340,6 @@ export default function ProfileScreen() {
       setSavedGeminiApiKey(trimmedKey);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-      if (isFirebaseConfigured() && trimmedKey) {
-        const result = await handleKeyAutofill(trimmedKey, 'gemini');
-        if (result.autofilled && result.tmdbKey) {
-          setApiKey(result.tmdbKey);
-          setSavedApiKey(result.tmdbKey);
-          showCustomAlert(
-            'Success',
-            'Gemini API key saved! Bound TMDB API key was automatically retrieved from the cloud.'
-          );
-          return;
-        }
-
-        // Link with existing TMDB key if it exists
-        if (apiKey.trim()) {
-          await bindKeys(apiKey.trim(), trimmedKey);
-          showCustomAlert('Success', 'Gemini API key saved and bound with TMDB API key in the cloud.');
-          return;
-        }
-      }
-
       showCustomAlert('Success', 'Gemini API key saved successfully');
     } catch (err) {
       console.error('Save Gemini API key error:', err);
@@ -528,28 +358,7 @@ export default function ProfileScreen() {
       setSavedApiKey(trimmedKey);
       await tmdbService.setApiKey(trimmedKey);
 
-      // Re-initialise cloud sync with new key
-      if (isFirebaseConfigured()) {
-        cloudSync.initCloudSync(trimmedKey).catch(() => {});
-        
-        const result = await handleKeyAutofill(trimmedKey, 'tmdb');
-        if (result.autofilled && result.geminiKey) {
-          setGeminiApiKey(result.geminiKey);
-          setSavedGeminiApiKey(result.geminiKey);
-          showCustomAlert(
-            'Success',
-            'TMDB API key saved! Bound Gemini API key was automatically retrieved from the cloud.'
-          );
-          return;
-        }
-
-        // Link with existing Gemini key if it exists
-        if (geminiApiKey.trim()) {
-          await bindKeys(trimmedKey, geminiApiKey.trim());
-          showCustomAlert('Success', 'TMDB API key saved and bound with Gemini API key in the cloud.');
-          return;
-        }
-      }
+      if (isFirebaseConfigured()) await cloudSync.initCloudSync(trimmedKey);
 
       showCustomAlert('Success', 'API key saved successfully');
     } catch (err) {
@@ -574,7 +383,7 @@ export default function ProfileScreen() {
     setSyncBusy(true);
     try {
       if (!cloudSync.isCloudEnabled()) {
-        const key = await AsyncStorage.getItem('@matinee_api_key');
+        const key = await getSecret('@matinee_api_key');
         if (key) {
           await cloudSync.initCloudSync(key);
         }
@@ -608,8 +417,6 @@ export default function ProfileScreen() {
   const performClearLocal = useCallback(async () => {
     try {
       await clearAllData();
-      setItems([]);
-      setCounts({ watched: 0, watchlist: 0 });
       showCustomAlert('Done', 'Local data has been cleared.');
     } catch (err) {
       console.error('Clear local data error:', err);
@@ -636,17 +443,17 @@ export default function ProfileScreen() {
         await cloudSync.deleteAllCloudData();
       }
       await clearAllData();
-      await AsyncStorage.removeItem('@matinee_api_key');
+      await removeSecret('@matinee_api_key');
+      await removeSecret('PREF_GEMINI_API_KEY');
+      await cloudSync.disconnectAccount();
       await tmdbService.removeApiKey();
 
-      setItems([]);
-      setCounts({ watched: 0, watchlist: 0 });
       setApiKey('');
       setSavedApiKey('');
       setSelectedLanguages(DEFAULT_LANGUAGES);
       setIncludeAdult(false);
       setFilterByCountry(false);
-      setUserCountry('US');
+      setUserCountry('IN');
       setSelectedOttProviders([]);
       setGeminiApiKey('');
       setSavedGeminiApiKey('');
@@ -657,7 +464,7 @@ export default function ProfileScreen() {
       await setPreference('PREF_ADULT_CONTENT', 'false');
       invalidateTmdbSettingsCache();
       await setPreference('PREF_FILTER_BY_COUNTRY', 'false');
-      await setPreference('PREF_USER_COUNTRY', 'US');
+      await setPreference('PREF_USER_COUNTRY', 'IN');
       await setPreference('PREF_OTT_PROVIDERS', '');
       await setPreference('PREF_GEMINI_API_KEY', '');
 
@@ -758,7 +565,7 @@ export default function ProfileScreen() {
           : await FileSystem.readAsStringAsync(asset.uri);
       const summary = await importUserData(JSON.parse(backupJson));
 
-      await Promise.all([fetchItems(), loadPreferences()]);
+      await loadPreferences();
 
       showCustomAlert(
         'Backup restored',
@@ -770,123 +577,7 @@ export default function ProfileScreen() {
     } finally {
       setRestoreBusy(false);
     }
-  }, [fetchItems, loadPreferences, showCustomAlert]);
-
-  const handleItemPress = useCallback(
-    (item: WatchedItem) => {
-      router.push({
-        pathname: '/detail/[id]',
-        params: { id: String(item.tmdbId), mediaType: item.mediaType },
-      });
-    },
-    [router]
-  );
-
-  const renderLibraryItem = useCallback(
-    ({ item }: { item: WatchedItem }) => {
-      const isFuture = !!item.releaseDate && new Date(item.releaseDate) > new Date();
-
-      let releaseText = '';
-      if (item.releaseDate) {
-        if (isFuture) {
-          try {
-            const dateObj = new Date(item.releaseDate);
-            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            releaseText = `${months[dateObj.getMonth()]} ${dateObj.getDate()}, ${dateObj.getFullYear()}`;
-          } catch {
-            releaseText = item.releaseDate;
-          }
-        } else {
-          releaseText = item.releaseDate.split('-')[0];
-        }
-      }
-
-      const type = item.mediaType || (item.releaseDate ? 'movie' : 'tv');
-      const typeLabel = type === 'tv' ? 'Series' : 'Movie';
-      const ratingLabel = item.userRating
-        ? `Your rating ${item.userRating.toFixed(1)} out of 10`
-        : item.voteAverage > 0
-          ? `Rated ${item.voteAverage.toFixed(1)} out of 10`
-          : null;
-
-      return (
-        <Card
-          variant="filled"
-          radius={shape.medium}
-          onPress={() => handleItemPress(item)}
-          onLongPress={() => handleLibraryItemLongPress(item)}
-          style={{ width: gridCardWidth, backgroundColor: 'transparent' }}
-          accessibilityLabel={[item.title, typeLabel, releaseText, ratingLabel]
-            .filter(Boolean)
-            .join(', ')}
-          accessibilityHint="Double tap to open. Long press for quick actions."
-        >
-          <View
-            style={[
-              styles.gridPosterWrap,
-              { height: gridPosterHeight, backgroundColor: colors.surfaceContainerHighest },
-            ]}
-          >
-            {item.posterPath ? (
-              <Image
-                source={{ uri: getImageUrl(item.posterPath, 'w342') || '' }}
-                style={styles.fill}
-                resizeMode="cover"
-                accessible={false}
-              />
-            ) : (
-              <View style={[styles.fill, styles.center]}>
-                <Ionicons name="film-outline" size={24} color={colors.onSurfaceVariant} />
-              </View>
-            )}
-
-            {/* A rating the user set outranks the TMDB average. */}
-            {item.userRating ? (
-              <View style={[styles.ratingBadge, { backgroundColor: colors.primary }]}>
-                <Ionicons name="star" size={10} color={colors.onPrimary} />
-                <Text variant="labelSmall" color={colors.onPrimary} maxFontSizeMultiplier={1.2}>
-                  {item.userRating.toFixed(1)}
-                </Text>
-              </View>
-            ) : item.voteAverage > 0 ? (
-              <View style={styles.ratingBadgeScrim}>
-                <Ionicons name="star" size={10} color={SCRIM_ON} />
-                <Text variant="labelSmall" color={SCRIM_ON} maxFontSizeMultiplier={1.2}>
-                  {item.voteAverage.toFixed(1)}
-                </Text>
-              </View>
-            ) : null}
-
-            <View style={styles.typeBadge}>
-              <Text variant="labelSmall" color={SCRIM_ON} maxFontSizeMultiplier={1.2}>
-                {typeLabel}
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.gridMeta}>
-            <Text variant="titleSmall" color={colors.onSurface} numberOfLines={2}>
-              {item.title}
-            </Text>
-            {releaseText ? (
-              <Text
-                variant="bodySmall"
-                color={isFuture ? colors.primary : colors.onSurfaceVariant}
-                numberOfLines={1}
-              >
-                {releaseText}
-              </Text>
-            ) : null}
-          </View>
-        </Card>
-      );
-    },
-    [handleItemPress, handleLibraryItemLongPress, colors, gridCardWidth, gridPosterHeight]
-  );
-
-  /* ---------------------------------------------------------------- *
-   * Settings
-   * ---------------------------------------------------------------- */
+  }, [loadPreferences, showCustomAlert]);
 
   const renderSettings = () => (
     <ScrollView
@@ -982,8 +673,7 @@ export default function ProfileScreen() {
             />
           }
         />
-        {filterByCountry ? (
-          <>
+        <>
             <Divider inset={spacing.lg} />
             <ListItem
               headline="Your country"
@@ -995,8 +685,7 @@ export default function ProfileScreen() {
               onPress={() => setCountryDropdownOpen(true)}
               accessibilityHint="Opens the country picker"
             />
-          </>
-        ) : null}
+        </>
       </SettingsGroup>
 
       {/* Streaming platforms */}
@@ -1060,21 +749,7 @@ export default function ProfileScreen() {
 
       {/* Cloud sync */}
       <SettingsGroup title="Cloud sync" icon="cloud-outline">
-        <Text variant="bodyMedium" color={colors.onSurfaceVariant}>
-          {cloudSync.isCloudEnabled()
-            ? `Connected${lastSyncDisplay ? ` · last sync ${lastSyncDisplay}` : ''}`
-            : isFirebaseConfigured()
-              ? 'Set your API key to enable sync.'
-              : 'Firebase is not configured — your data stays on this device.'}
-        </Text>
-        <Button
-          label={syncBusy ? 'Syncing…' : 'Sync now'}
-          icon="sync-outline"
-          variant="tonal"
-          onPress={handleSyncNow}
-          loading={syncBusy}
-          disabled={!cloudSync.isCloudEnabled()}
-        />
+        <AccountSync />
       </SettingsGroup>
 
       {/* Updates */}
@@ -1163,76 +838,7 @@ export default function ProfileScreen() {
       {showSettings ? (
         renderSettings()
       ) : (
-        <>
-          {/* Watchlist / Watched */}
-          <View style={{ paddingHorizontal: gutter, paddingBottom: spacing.md }}>
-            <SegmentedButtons
-              options={[
-                { value: 'watchlist' as LibraryTab, label: `Watchlist (${counts.watchlist})` },
-                { value: 'watched' as LibraryTab, label: `Watched (${counts.watched})` },
-              ]}
-              value={activeTab}
-              onChange={setActiveTab}
-              accessibilityLabel="Library section"
-              style={styles.fullWidthSegments}
-            />
-          </View>
-
-          {/* Media type filter */}
-          <View style={[styles.chipRow, { paddingHorizontal: gutter }]}>
-            {[
-              { key: null, label: 'All' },
-              { key: 'movie' as MediaType, label: 'Movies' },
-              { key: 'tv' as MediaType, label: 'Series' },
-            ].map(({ key, label }) => (
-              <Chip
-                key={String(key)}
-                label={label}
-                variant="filter"
-                selected={filterMediaType === key}
-                onPress={() => setFilterMediaType(key)}
-              />
-            ))}
-          </View>
-
-          {/* Grid */}
-          <FlatList
-            style={styles.flexOne}
-            key={`${filterMediaType}-${activeTab}-${posterColumns}`}
-            data={items}
-            renderItem={renderLibraryItem}
-            keyExtractor={(item) => `lib-${item.id}`}
-            numColumns={posterColumns}
-            columnWrapperStyle={
-              posterColumns > 1 ? { paddingHorizontal: gutter, gap: GRID_GAP } : undefined
-            }
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ paddingBottom: bottomPadding, gap: spacing.lg }}
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                onRefresh={onRefresh}
-                tintColor={colors.primary}
-                colors={[colors.primary]}
-                progressBackgroundColor={colors.surfaceContainerHigh}
-              />
-            }
-            ListEmptyComponent={
-              <EmptyState
-                icon={activeTab === 'watchlist' ? 'bookmark-outline' : 'checkmark-circle-outline'}
-                title={
-                  activeTab === 'watchlist' ? 'Your watchlist is empty' : 'Nothing logged yet'
-                }
-                subtitle={
-                  activeTab === 'watchlist'
-                    ? 'Browse Discover and save titles you want to watch.'
-                    : 'Rate something you have seen and it will appear here.'
-                }
-                compact
-              />
-            }
-          />
-        </>
+        <LibraryBrowser key={`${tab ?? 'library'}:${mediaType ?? 'all'}`} initialTab={tab} initialMediaType={mediaType} bottomPadding={bottomPadding} />
       )}
 
       {/* Country picker */}
@@ -1285,46 +891,7 @@ export default function ProfileScreen() {
         }
       />
 
-      {/* Quick actions */}
-      <BottomSheet
-        visible={!!longPressItem}
-        onDismiss={() => setLongPressItem(null)}
-        title={longPressItem?.title ?? ''}
-        subtitle={
-          longPressItem?.releaseDate
-            ? new Date(longPressItem.releaseDate) > new Date()
-              ? 'Not yet released'
-              : `Released in ${longPressItem.releaseDate.substring(0, 4)}`
-            : undefined
-        }
-      >
-        <View style={styles.sheetList}>
-          {longPressItem &&
-          !(longPressItem.releaseDate && new Date(longPressItem.releaseDate) > new Date()) ? (
-            <ListItem
-              headline="Rate and log"
-              leadingIcon="star-outline"
-              leadingIconColor={colors.primary}
-              onPress={() => handleLongPressAction('rate')}
-            />
-          ) : null}
 
-          <ListItem
-            headline="Remove from library"
-            leadingIcon="trash-outline"
-            destructive
-            onPress={() => handleLongPressAction('remove')}
-          />
-
-          <ListItem
-            headline="Not interested"
-            leadingIcon="eye-off-outline"
-            leadingIconColor={colors.primary}
-            onPress={() => handleLongPressAction('not_interested')}
-            accessibilityHint="Hides this title from recommendations"
-          />
-        </View>
-      </BottomSheet>
     </View>
   );
 }
