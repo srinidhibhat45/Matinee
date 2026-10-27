@@ -63,26 +63,38 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
-      - name: Setup Expo & EAS
-        uses: expo/expo-github-action@v8
-        with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Check Expo token
+        shell: bash
+        run: |
+          if [ -z "${EXPO_TOKEN:-}" ]; then
+            echo "::error::EXPO_TOKEN is missing. Set the repository Actions secret before publishing."
+            exit 1
+          fi
+
+      # Install the verified release using npm rather than the action's
+      # failing Yarn global installer/cache. Keep CLI upgrades deliberate.
+      - name: Install EAS CLI
+        run: |
+          npm install --global eas-cli@26.0.0 --registry=https://registry.npmjs.org --no-audit --no-fund
+          eas --version
+
+      - name: Verify Expo authentication
+        run: eas whoami
 
       - name: Install Dependencies
         run: npm ci
 
       - name: Build on EAS
         run: |
-          npx eas-cli build --platform android --profile preview --non-interactive
+          eas build --platform android --profile preview --non-interactive
 
       - name: Fetch and Download APK
         run: |
           # Fetch the URL of the last successfully completed build
-          DOWNLOAD_URL=$(npx eas-cli build:list --platform android --profile preview --status finished --limit 1 --json | jq -r '.[0].artifacts.buildUrl')
+          DOWNLOAD_URL=$(eas build:list --platform android --profile preview --status finished --limit 1 --json | jq -r '.[0].artifacts.buildUrl')
           if [ "$DOWNLOAD_URL" = "null" ] || [ -z "$DOWNLOAD_URL" ]; then
             echo "Error: Failed to fetch APK download URL from EAS"
             exit 1

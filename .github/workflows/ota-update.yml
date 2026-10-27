@@ -15,6 +15,15 @@ on:
         description: 'EAS Update branch to publish to'
         required: false
         default: 'preview'
+      environment:
+        description: 'EAS environment used to bundle the update'
+        type: choice
+        required: true
+        default: preview
+        options:
+          - development
+          - preview
+          - production
 
 concurrency:
   group: ota-update-${{ github.ref }}
@@ -70,14 +79,26 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
-      - name: Setup Expo & EAS
-        uses: expo/expo-github-action@v8
-        with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Check Expo token
+        shell: bash
+        run: |
+          if [ -z "${EXPO_TOKEN:-}" ]; then
+            echo "::error::EXPO_TOKEN is missing. Set the repository Actions secret before publishing."
+            exit 1
+          fi
+
+      # Install the verified release using npm rather than the action's
+      # failing Yarn global installer/cache. Keep CLI upgrades deliberate.
+      - name: Install EAS CLI
+        run: |
+          npm install --global eas-cli@26.0.0 --registry=https://registry.npmjs.org --no-audit --no-fund
+          eas --version
+
+      - name: Verify Expo authentication
+        run: eas whoami
 
       - name: Install Dependencies
         run: npm ci
@@ -91,11 +112,14 @@ jobs:
       # backtick, quote or `$(...)` would otherwise be executed as a command —
       # on a runner that has EXPO_TOKEN in its environment.
       - name: Publish update
+        shell: bash
         env:
           BRANCH_INPUT: ${{ github.event.inputs.branch }}
+          ENVIRONMENT_INPUT: ${{ github.event.inputs.environment }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           BRANCH="${BRANCH_INPUT:-preview}"
+          ENVIRONMENT="${ENVIRONMENT_INPUT:-preview}"
 
           # EAS caps the update message, and only the subject line is useful
           # here anyway — the full body is a git log away.
@@ -104,7 +128,24 @@ jobs:
 
           echo "Publishing OTA update to branch: $BRANCH"
           echo "Message: $MESSAGE"
-          npx eas-cli update \
+          eas update \
             --branch "$BRANCH" \
+            --platform android \
+            --environment "$ENVIRONMENT" \
             --message "$MESSAGE" \
-            --non-interactive
+            --non-interactive \
+            --json | tee ota-update.json
+
+      - name: Record published update
+        run: |
+          node -e "JSON.parse(require('node:fs').readFileSync('ota-update.json', 'utf8'))"
+          echo "### Android OTA published" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Update metadata is attached as the ota-update artifact." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ota-update
+          path: ota-update.json
+          if-no-files-found: error
